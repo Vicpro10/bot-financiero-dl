@@ -30,15 +30,16 @@
 |---|---|
 | **Datos** | Descarga velas diarias **cerradas** de BTC/USDT desde la API pública de MEXC (`/api/v3/klines`, UTC, desde 2020-01-01, más de 2,100 velas). Excluye la vela abierta, audita los datos (duplicados, orden, huecos, no finitos y precios ≤ 0) y no rellena ni inventa volumen. |
 | **Modelo** | Pronostica el rendimiento del día siguiente $y_t = P_{t+1}/P_t - 1$ con los 20 rendimientos más recientes, más `dist_sma20` y `vol20` (contrato de variables `v1`). Compara el pronóstico cero, la regresión lineal, MLP y LSTM. |
-| **Señal** | Comprar o mantener si el pronóstico supera un umbral δ (y, si se eligió en VA, si el cierre está sobre la SMA20); en otro caso, efectivo. |
+| **Señal** | **Long** si el pronóstico supera un umbral δ (elegido en VA); **Short** si es menor que −δ (modo Long/Short, opcional); en otro caso, efectivo. Cada operación registra su **Entry** (precio de entrada) y su PnL al cerrarse. |
 | **Agente** | Repite el ciclo: velas de MEXC, variables, pronóstico, propuesta (LLM local o regla del modelo), validación del JSON, riesgo determinista, ejecución Paper, SQLite y UI. |
-| **Panel** | Precio en vivo de MEXC, pronóstico, indicadores, acción propuesta y motivo, estado de riesgo, posición, patrimonio, **operaciones con PnL**, curva de patrimonio contra comprar y mantener, comparación de corridas, bitácora de errores y botones **Iniciar / Pausar / Reanudar / Detener / Liquidar**. |
+| **Panel** | Precio en vivo de MEXC por **WebSocket**, **gráfico de velas** con SMA20, Bandas de Bollinger y entradas/salidas, estados de carga y error, pronóstico, indicadores, acción propuesta y motivo, estado de riesgo, posición, patrimonio, **operaciones con PnL**, curva de patrimonio contra comprar y mantener, comparación de corridas, bitácora de errores y botones **Iniciar / Pausar / Reanudar / Detener / Liquidar**. |
 
 ## 2. Arquitectura
 
 ```mermaid
 flowchart LR
-  UI["React + TypeScript<br/>(Vite, :5173)"] -- "X-API-Key" --> API["Backend FastAPI<br/>autenticado (:8000)"]
+  UI["React + TypeScript<br/>(Vite, :5173)"] -- "REST /api/* (X-API-Key)" --> API["Backend FastAPI<br/>autenticado (:8000)"]
+  API -- "WebSocket /ws: ticker cada 5 s, decisiones, estado, errores" --> UI
   API --> MX["MEXC API pública<br/>klines 1d · ticker · exchangeInfo"]
   API --> MOD["Modelo predictivo versionado<br/>model.npz + meta.json (escalador)"]
   API --> GW["Gateway LLM<br/>(misma API key)"] --> OL["Ollama LOCAL<br/>llama3.2:3b @127.0.0.1:11434"]
@@ -80,7 +81,7 @@ bot-financiero-dl/
 │   │   ├── backtest.py  ← simulación vectorial y métricas
 │   │   ├── config.py, db.py
 │   ├── scripts/train_cpu_baseline.py   ← modelo provisional v0 en CPU
-│   └── tests/test_controls.py          ← 16 pruebas automatizadas de controles
+│   └── tests/test_controls.py          ← 23 pruebas automatizadas (controles, Long/Short, stop-loss, WebSocket)
 ├── frontend/                      ← React 18 + TypeScript + Vite
 │   └── src/ (App.tsx, Charts.tsx, api.ts, styles.css)
 ├── data/raw, data/processed       ← datos originales y procesados (CSV)
@@ -191,13 +192,27 @@ Del zip, copie `modelos/final/` (o `modelos/dl_best/` para usar el mejor modelo 
 | `max_daily_loss` | 5% | si el patrimonio cae 5% en el día, se bloquean compras |
 | `max_drawdown_halt` | 25% | si el drawdown supera 25%, el agente se detiene (solo permite vender) |
 | `max_data_age_hours` | 30 h | si la última vela cerrada es más antigua, se bloquean órdenes |
+| `stop_loss_pct` | 0 (apagado; por corrida en `/api/agent/start`) | cierra la posición si el movimiento adverso desde la entrada supera el porcentaje |
+| `allow_short` | sí (cada corrida elige) | permite el modo Long/Short en Paper, sin apalancamiento |
 | `allowed_symbols` | BTCUSDT | cualquier otro símbolo se rechaza |
 
 **Simulador Paper:** respeta saldo (no compra más que el efectivo incluyendo costos), **tamaño mínimo y precisión del par** (leídos de `exchangeInfo` de MEXC: paso 0.000001 BTC, precio con 2 decimales, mínimo 1 USDT), costos y momento de ejecución:
 - En **replay**, la señal del cierre de *t* se ejecuta en la **apertura de t+1** y el patrimonio se valora al cierre de *t+1*.
 - En **live**, se ejecuta al último precio de MEXC tras el cierre de la vela.
 
-Las ejecuciones y los rechazos quedan registrados. Sin apalancamiento ni ventas en corto.
+Las ejecuciones y los rechazos quedan registrados. Sin apalancamiento.
+
+**Entry, Long y Short (v1.1).** Cada corrida elige *Solo largo* (por defecto, como pide el protocolo de la práctica) o *Long/Short* (casilla del panel o `allow_short: true`):
+
+| Posición | Abre | Cierra | Cómo se valora |
+|---|---|---|---|
+| **Long** | `BUY` | `SELL` | efectivo + cantidad × precio |
+| **Short** | `SHORT` (vende BTC prestado; el producto queda como efectivo de respaldo) | `COVER` (recompra) | efectivo − cantidad × precio |
+| Efectivo | — | — | efectivo |
+
+- **Entry:** al abrir se guarda el precio de entrada (`entry_price`), que el panel muestra junto a la posición. El PnL se calcula al cerrar: en un largo es venta − compra; en un corto es venta corta − recompra. Ambos incluyen costos y deslizamiento.
+- **Sin apalancamiento:** la exposición absoluta nunca supera el 95% del patrimonio. No se permiten dos posiciones a la vez ni el giro directo de largo a corto; el giro toma dos velas, primero se cierra y luego se abre.
+- **La regla de corto es simétrica a la de largo** (pronóstico < −δ, el mismo δ elegido en VA), sin parámetros nuevos.
 
 ## 7. API del backend
 
@@ -208,7 +223,8 @@ Todas las rutas requieren la cabecera `X-API-Key`, excepto `/api/health`.
 | GET | `/api/health` | vivo; confirma `real_orders: disabled` |
 | GET | `/api/status` | estado del agente, cartera, última decisión, modelo y riesgo |
 | GET | `/api/market` | ticker en vivo de MEXC, última vela cerrada, indicadores y **pronóstico del siguiente día** |
-| POST | `/api/agent/start` | `{mode: replay\|live, strategy: model\|llm, replay_days}` |
+| POST | `/api/agent/start` | `{mode: replay\|live, strategy: model\|llm, replay_days, allow_short}` |
+| WS | `/ws` | canal en vivo; el primer mensaje es `{"type":"auth","key":"..."}` (la clave no viaja en la URL). Empuja `ticker`, `decision`, `status` y `event` |
 | POST | `/api/agent/pause` · `/resume` · `/stop` · `/liquidate` | control humano |
 | GET | `/api/runs` · `/api/runs/{id}` | métricas por corrida (con comprar y mantener), patrimonio, decisiones y órdenes |
 | GET | `/api/events` | bitácora de eventos y errores |
@@ -236,7 +252,7 @@ Todas las rutas requieren la cabecera `X-API-Key`, excepto `/api/health`.
 cd backend
 python -m pytest -q tests
 ```
-Resultado actual: **16 passed**. Cubren la validación de datos (vacío, duplicado, no finito, ventana insuficiente), la exclusión de la vela abierta, el contrato del modelo, el riesgo (saldo, dato atrasado, sin cortos ni recompras, símbolo, detención, pérdida diaria), el JSON del LLM, Ollama caído, la idempotencia, la recuperación tras reinicio, MEXC caído, la detención y la API sin clave o con clave incorrecta.
+Resultado actual: **23 passed**. Cubren la validación de datos (vacío, duplicado, no finito, ventana insuficiente), la exclusión de la vela abierta, el contrato del modelo, el riesgo (saldo, dato atrasado, sin cortos ni recompras, símbolo, detención, pérdida diaria), el JSON del LLM, Ollama caído, la idempotencia, la recuperación tras reinicio, MEXC caído, la detención y la API sin clave o con clave incorrecta.
 
 ## 9. Resultados
 
@@ -320,7 +336,37 @@ Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (
 - En TE, la MLP tuvo menor RMSE que la regresión lineal (0.023351 contra 0.023403) y la LSTM con indicadores fue la única por debajo del pronóstico cero (0.023060 contra 0.023122).
 - Simulación en TE con la MLP: −22.7% con 0.10% por lado y −6.2% con 0% (MEXC), frente a −35.3% de comprar y mantener.
 
-### 9.5 Lectura honesta
+### 9.5 Entry, Long y Short (v1.1)
+**Replays con el modelo de la T4** (50,000 USDT, 0% de costo, 2 pb de deslizamiento, mismos periodos):
+
+| Corrida | Periodo | Rend. neto | PnL (USDT) | Max DD | Operaciones (largos/cortos cerrados) | Win Rate | Comprar y mantener |
+|---|---|---|---|---|---|---|---|
+| Solo largo, 90 días | 2026-08-28 → 2026-11-25 | +7.03% | +3,513.67 | 4.9% | 51 | 52.0% | −24.66% |
+| **Long/Short, 90 días** | 2026-08-28 → 2026-11-25 | **+11.08%** | **+5,539.64** | 4.5% | 57 (24 / 4) | 50.0% | −24.66% |
+| Solo largo, 60 días | 2026-09-27 → 2026-11-25 | +2.55% | +1,276.36 | 4.9% | 35 | 47.1% | −28.41% |
+| **Long/Short, 60 días** | 2026-09-27 → 2026-11-25 | **+4.05%** | **+2,025.87** | 4.0% | 39 (17 / 2) | 47.4% | −28.41% |
+
+**Métricas de riesgo por corrida** (90 días, fórmulas de los apuntes: Sharpe y Sortino anualizados a 365 días con tasa libre de riesgo 0, y VaR/CVaR históricos a 1 día al 95%). Las tres corridas se ven en el panel:
+
+| Corrida (90 días) | Rend. neto | Sharpe | Sortino | Volatilidad anual | VaR 95% | CVaR 95% | Stop-loss |
+|---|---|---|---|---|---|---|---|
+| Solo largo | +7.03% | 1.42 | 2.60 | 20.9% | 1.79% | 2.27% | — |
+| Long/Short | +11.08% | 2.11 | 4.25 | 21.2% | 1.66% | 2.11% | — (con 5% no se activa) |
+| Long/Short + stop 2% | +10.51% | 2.01 | 4.05 | 21.2% | 1.66% | 2.11% | 2% (2 activaciones) |
+
+**Año completo de prueba TE** (`backend/scripts/eval_long_short_te.py` → `reports/long_short_TE.json`; 100,000 USDT, ejecución en la apertura de t+1). La simulación solo largo reproduce exactamente las cifras del notebook de la T4 (−22.71% y −6.17%), lo que valida el cálculo:
+
+| Estrategia | Costo | Rend. neto | Max DD | Largos / cortos | PnL largos | PnL cortos | Win Rate |
+|---|---|---|---|---|---|---|---|
+| Solo largo | 0.10% | −22.71% | 36.9% | 97 / 0 | −22,713 | — | 46.4% |
+| Long/Short | 0.10% | −14.87% | 36.7% | 92 / 18 | −14,235 | −636 | 46.4% |
+| Solo largo | 0% (MEXC) | −6.17% | 31.1% | 97 / 0 | −6,166 | — | 49.5% |
+| **Long/Short** | **0% (MEXC)** | **+6.07%** | 30.0% | 92 / 18 | +3,169 | +2,903 | 49.1% |
+| Comprar y mantener | 0.10% | −35.25% | 39.5% | — | — | — | — |
+
+De los 373 días de TE, la señal fue LONG 163 días, SHORT 37 y efectivo 173. **Declaración de contaminación (protocolo, sección 3):** TE ya se había usado en la evaluación oficial solo largo. La regla corta se agregó por el criterio 5 de la rúbrica del proyecto (Entry, Long, Short), no por estos resultados: es la regla simétrica, con el mismo δ y ningún parámetro ajustado. Aun así es un análisis posterior, no una evaluación intacta; la confirmación requiere un periodo nuevo.
+
+### 9.6 Lectura honesta
 - La estrategia pierde menos que comprar y mantener en mercados bajistas porque pasa a efectivo, pero **en TE no obtuvo rentabilidad positiva**. El protocolo pide "+20%"; la rúbrica aclara que "no se exige obtener ganancias ni superar al modelo sencillo". Se reportan las cifras reales, sin ajustar el sistema después de ver TE.
 - Superar al pronóstico cero en RMSE con rendimientos diarios es difícil: la señal útil es pequeña frente al ruido.
 - En la T4, el deep learning supera a la regresión lineal en TE pero empata con ella en VA. En los replays recientes el agente con la MLP fue positivo (+7.03% en 90 días, +2.55% en 60) mientras el mercado caía de 25% a 28%. En el TE completo (un año bajista, −35%) perdió −6.2% con 0% de costo. No alcanza el +20% en TE, y así se reporta.
@@ -339,9 +385,12 @@ Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (
 | **v0.8** | 2026-11-26 | Proyecto final | Panel React + TypeScript: precio en vivo, pronóstico, operaciones, PnL, comparación y bitácora |
 | **v0.9** | 2026-11-26 | Proyecto final | Inyección de fallos, 16 pruebas automatizadas, recuperación tras reinicio |
 | **v0.9.1** | 2026-11-26 | Proyecto final | Ollama local integrado (llama3.2:3b), prompt v2 con definiciones de indicadores y `model_action`, comparación sin LLM, con LLM y pasiva; notebook probado de punta a punta y exporta `lstm_best` |
+| **v1.1** | 2026-11-26 | Rúbrica de la app | **Entry/Long/Short** en Paper (SHORT/COVER, sin apalancamiento), **WebSocket** `/ws` con ticker, decisiones y eventos en vivo, **gráfico de velas** con SMA20, Bollinger y entradas/salidas, estados de carga y error, diagrama REST + WebSocket, **stop-loss** por operación, **Sharpe/Sortino/VaR/CVaR** por corrida, 23 pruebas, autoevaluación `docs/RUBRICA_AUTOEVALUACION.md` |
 | **v1.0** | 2026-11-26 | Entrega | Notebook ejecutado en Colab **Tesla T4**; modelo MLP de la T4 integrado al agente (`models/current`), evidencia en `reports/colab_t4/`, README y presentación con cifras reales |
 
 ## 11. Correspondencia con las rúbricas
+
+> Autoevaluación detallada contra la **Rúbrica · Proyecto de App de Trading con IA** (5 criterios, 100 pts): [`docs/RUBRICA_AUTOEVALUACION.md`](docs/RUBRICA_AUTOEVALUACION.md).
 
 **Práctica (100 pts):** Datos (§5.2 sec. 1) · TR/VA/TE (sec. 2 y 8) · Referencias y modelos (sec. 2 y 3) · T4 (sec. 0 y 3) · Validación y estudio técnico (sec. 3, 4 y 6) · Estimaciones (sec. 8) · Manejo de errores (sec. 7 y bitácora) · Agente y simulación (sec. 5 y 8) · Reproducibilidad (sec. 9 y 10).
 
@@ -368,6 +417,7 @@ Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (
 ## 13. Limitaciones y trabajo futuro
 - Un solo activo (BTC/USDT) y un solo periodo de prueba; los costos y el deslizamiento son supuestos académicos.
 - La frecuencia es diaria: en modo live solo hay una decisión nueva por día. Los 20 o más ciclos de la demostración se obtienen en **replay**, identificado como tal.
+- Los cortos son simulados: en Paper no se modelan el costo del préstamo ni el *funding* de un margen real. Con 0.10% por lado el Long/Short sigue negativo en TE.
 - Siguiente paso: convertir `TradingEnv` en el entorno de entrenamiento y entrenar **DQN/DDQN** con una prueba independiente nueva.
 
 *Simulación educativa. No es asesoría de inversión.*

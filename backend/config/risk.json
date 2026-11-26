@@ -12,6 +12,9 @@
   "allowed_actions": [
     "BUY",
     "HOLD",
-    "SELL"
-  ]
+    "SELL",
+    "SHORT",
+    "COVER"
+  ],
+  "allow_short": true
 }

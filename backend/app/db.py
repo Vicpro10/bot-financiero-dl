@@ -73,7 +73,20 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        # migraciones v1.1 (bases creadas con versiones anteriores)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(runs)").fetchall()}
+        for col, ddl in (("allow_short", "INTEGER NOT NULL DEFAULT 0"), ("entry_price", "REAL NOT NULL DEFAULT 0"), ("stop_loss_pct", "REAL NOT NULL DEFAULT 0")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {ddl}")
         self.lock = threading.RLock()
+        self.listeners: list = []   # callbacks del WebSocket (se notifican eventos en vivo)
+
+    def notify(self, msg: dict):
+        for cb in list(self.listeners):
+            try:
+                cb(msg)
+            except Exception:  # un cliente caído no debe detener al agente
+                self.listeners.remove(cb)
 
     def q(self, sql: str, args: tuple = ()) -> list[dict]:
         with self.lock:
@@ -93,6 +106,7 @@ class DB:
         # Nunca registrar secretos: detail solo contiene datos de diagnóstico.
         self.ex("INSERT INTO events(run_id,time,level,kind,message,detail) VALUES (?,?,?,?,?,?)",
                 (run_id, now_iso(), level, kind, message, json.dumps(detail, default=str) if detail else None))
+        self.notify({"type": "event", "kind": kind, "level": level, "message": message, "run_id": run_id})
 
     def save_candles(self, symbol: str, df, source: str = "MEXC"):
         ts = now_iso()

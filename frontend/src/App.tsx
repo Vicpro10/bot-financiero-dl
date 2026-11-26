@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, clearKey, getKey, setKey, type EventRow, type Market, type RunDetail, type RunMetrics, type Status } from "./api";
-import { LineChart, type Marker } from "./Charts";
+import { CandleChart, LineChart, type TradeMark } from "./Charts";
 
 const usd = (v: number | null | undefined, d = 2) =>
   v == null ? "—" : v.toLocaleString("es-MX", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -49,7 +49,10 @@ export default function App() {
   const [sel, setSel] = useState<number | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({ mode: "replay", strategy: "model", replay_days: 60 });
+  const [form, setForm] = useState({ mode: "replay", strategy: "model", replay_days: 60, allow_short: false });
+  const [mkErr, setMkErr] = useState("");
+  const [wsOn, setWsOn] = useState(false);
+  const refreshRef = useRef<() => void>(() => {});
   const [llm, setLlm] = useState<{ q: string; a: string }>({ q: "Resume en una frase qué es el modo Paper.", a: "" });
 
   const refresh = useCallback(async () => {
@@ -66,10 +69,31 @@ export default function App() {
   }, [sel]);
 
   const refreshMarket = useCallback(async () => {
-    try { setMk(await api<Market>("/market?days=120")); } catch (x) { setErr(`Mercado: ${(x as Error).message}`); }
+    try { setMk(await api<Market>("/market?days=120")); setMkErr(""); } catch (x) { setMkErr((x as Error).message); }
   }, []);
 
-  useEffect(() => { if (!authed) return; refresh(); const t = setInterval(refresh, 2500); return () => clearInterval(t); }, [authed, refresh]);
+  refreshRef.current = refresh;
+  // Con WebSocket conectado el panel se actualiza por eventos; el sondeo REST queda como respaldo lento.
+  useEffect(() => { if (!authed) return; refresh(); const t = setInterval(refresh, wsOn ? 10000 : 2500); return () => clearInterval(t); }, [authed, refresh, wsOn]);
+  useEffect(() => {
+    if (!authed) return;
+    let ws: WebSocket | null = null, retry: number | undefined, closed = false, pending: number | undefined;
+    const connect = () => {
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+      ws.onopen = () => ws?.send(JSON.stringify({ type: "auth", key: getKey() }));
+      ws.onmessage = ev => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "hello") setWsOn(true);
+        else if (msg.type === "ticker") setMk(prev => prev ? { ...prev, ticker: { ...prev.ticker, last: msg.last, change_pct: msg.change_pct, high: msg.high, low: msg.low, time: msg.time } } : prev);
+        else if (["decision", "status", "event"].includes(msg.type)) {
+          window.clearTimeout(pending); pending = window.setTimeout(() => refreshRef.current(), 250);
+        }
+      };
+      ws.onclose = () => { setWsOn(false); if (!closed) retry = window.setTimeout(connect, 3000); };
+    };
+    connect();
+    return () => { closed = true; window.clearTimeout(retry); ws?.close(); };
+  }, [authed]);
   useEffect(() => { if (!authed) return; refreshMarket(); const t = setInterval(refreshMarket, 30000); return () => clearInterval(t); }, [authed, refreshMarket]);
 
   if (!authed) return <Login onOk={() => setAuthed(true)} />;
@@ -90,8 +114,10 @@ export default function App() {
 
   // gráfica de precio de la corrida (replay) o del mercado
   const priceRows = detail?.equity.length ? detail.equity : [];
-  const markers: Marker[] = (detail?.orders ?? []).filter(o => o.status === "FILLED" && o.exec_price)
-    .map(o => ({ x: o.exec_date, y: o.exec_price as number, kind: o.side as "BUY" | "SELL" }));
+  const trades: TradeMark[] = (detail?.orders ?? []).filter(o => o.status === "FILLED" && o.exec_price)
+    .map(o => ({ date: o.exec_date, price: o.exec_price as number, side: o.side }));
+  const posName = !p ? "—" : p.qty > 0 ? "LONG" : p.qty < 0 ? "SHORT" : "EFECTIVO";
+  const sideCls = (s: string) => (s === "BUY" || s === "COVER" ? "pos" : s === "SHORT" ? "pos-short" : s === "SELL" ? "neg" : "");
   const cap = detail?.metrics && runs.find(r => r.run_id === detail.metrics.run_id) ? (st?.run?.initial_capital ?? 50000) : 50000;
   const bh = priceRows.length ? priceRows.map(r => ({ x: r.date, y: cap * r.price / priceRows[0].price })) : [];
 
@@ -103,6 +129,7 @@ export default function App() {
           <p className="muted small">Modelo {st?.model.version} ({st?.model.kind}) · regla: pronóstico &gt; δ={pct(st?.model.signal_rule.delta, 2)}{st?.model.signal_rule.sma_filter ? " y cierre > SMA20" : ""} · <b>Modo Paper: órdenes reales deshabilitadas</b></p>
         </div>
         <div className="hdr-right">
+          <span className={`ws ${wsOn ? "on" : "off"}`} title="Canal WebSocket del backend">{wsOn ? "● WebSocket en vivo" : "○ WebSocket desconectado · usando REST"}</span>
           <span className={`pill s-${status}`}>{status.toUpperCase()}</span>
           <button className="ghost" onClick={() => { clearKey(); setAuthed(false); }}>Salir</button>
         </div>
@@ -126,33 +153,42 @@ export default function App() {
         {form.mode === "replay" && <label>Días
           <input type="number" min={20} max={365} value={form.replay_days} onChange={e => setForm({ ...form, replay_days: +e.target.value })} />
         </label>}
+        <label className="check" title="Permite abrir cortos en Paper, 100% respaldados por efectivo (sin apalancamiento)">
+          <input type="checkbox" checked={form.allow_short} onChange={e => setForm({ ...form, allow_short: e.target.checked })} />
+          Long/Short (permitir cortos)
+        </label>
         <div className="btns">
           <button className="primary" disabled={busy || status === "running"} onClick={() => act("/agent/start", form)}>Iniciar</button>
           <button disabled={busy || status !== "running"} onClick={() => act("/agent/pause")}>Pausar</button>
           <button disabled={busy || !["paused", "halted"].includes(status)} onClick={() => act("/agent/resume")}>Reanudar</button>
           <button className="danger" disabled={busy || ["stopped", "finished"].includes(status)} onClick={() => act("/agent/stop")}>Detener</button>
-          <button className="ghost" disabled={busy || !p || p.qty <= 0 || status === "running"} onClick={() => act("/agent/liquidate")}>Liquidar posición</button>
+          <button className="ghost" disabled={busy || !p || p.qty === 0 || status === "running"} onClick={() => act("/agent/liquidate")}>Liquidar posición</button>
         </div>
       </section>
 
       <section className="grid4">
         <div className="card kpi">
           <h3>Precio MEXC (en vivo)</h3>
-          <div className="big">{usd(mk?.ticker.last)} <small>USDT</small></div>
-          <div className={cls(mk?.ticker.change_pct)}>{mk ? `${(mk.ticker.change_pct * 100).toFixed(2)}% 24h` : "cargando…"}</div>
-          <div className="muted small">Última vela cerrada: {mk?.last_closed_candle} (UTC)</div>
+          {mkErr && !mk ? <div className="err-box"><span className="neg small">No se pudo leer MEXC: {mkErr}</span><button onClick={refreshMarket}>Reintentar</button></div>
+            : !mk ? <><div className="skeleton" /><p className="muted small">Cargando datos de MEXC…</p></>
+            : <>
+              <div className="big">{usd(mk.ticker.last)} <small>USDT</small></div>
+              <div className={cls(mk.ticker.change_pct)}>{`${(mk.ticker.change_pct * 100).toFixed(2)}% 24h`}{wsOn ? " · en vivo" : ""}</div>
+              <div className="muted small">Última vela cerrada: {mk.last_closed_candle} (UTC){mkErr ? " · ⚠ dato no actualizado" : ""}</div>
+            </>}
         </div>
         <div className="card kpi">
           <h3>Pronóstico del modelo</h3>
           <div className={`big ${cls(mk?.forecast.next_return)}`}>{mk ? `${(mk.forecast.next_return * 100).toFixed(3)}%` : "—"}</div>
-          <div>Señal: <b className={mk?.forecast.signal === "LONG" ? "pos" : ""}>{mk?.forecast.signal === "LONG" ? "COMPRAR / MANTENER" : "EFECTIVO"}</b></div>
+          <div>Solo largo: <b className={mk?.forecast.signal === "LONG" ? "pos" : ""}>{mk?.forecast.signal === "LONG" ? "COMPRAR / MANTENER" : "EFECTIVO"}</b></div>
+          <div>Long/Short: <b className={mk?.forecast.signal_long_short === "LONG" ? "pos" : mk?.forecast.signal_long_short === "SHORT" ? "pos-short" : ""}>{mk?.forecast.signal_long_short ?? "—"}</b></div>
           <div className="muted small">Rendimiento estimado del día siguiente a {mk?.forecast.cutoff}</div>
         </div>
         <div className="card kpi">
           <h3>Patrimonio Paper</h3>
           <div className="big">{usd(m?.patrimonio ?? equityNow)} <small>USDT</small></div>
           <div className={cls(m?.pnl_total)}>PnL {signed(m?.pnl_total)} ({pct(m?.rendimiento_neto)})</div>
-          <div className="muted small">Efectivo {usd(p?.cash)} · Posición {p ? p.qty.toFixed(6) : "—"} BTC</div>
+          <div className="muted small">Efectivo {usd(p?.cash)} · <b className={posName === "LONG" ? "pos-long" : posName === "SHORT" ? "pos-short" : ""}>{posName}</b> {p ? Math.abs(p.qty).toFixed(6) : "—"} BTC{p && p.qty !== 0 ? ` · Entry ${usd(p.entry_price)}` : ""}</div>
         </div>
         <div className="card kpi">
           <h3>Indicadores (cierre)</h3>
@@ -170,7 +206,7 @@ export default function App() {
           <h3>Última decisión del agente</h3>
           {dec ? <div className="decision">
             <div><span className="muted">Vela</span> {dec.candle_date} · <span className="muted">fuente</span> {dec.proposal_source}</div>
-            <div className="act">Propuesta: <b>{dec.proposed_action}</b> → Final: <b className={dec.final_action === "BUY" ? "pos" : dec.final_action === "SELL" ? "neg" : ""}>{dec.final_action}</b>
+            <div className="act">Propuesta: <b>{dec.proposed_action}</b> → Final: <b className={sideCls(dec.final_action)}>{dec.final_action}</b>
               <span className={`pill r-${dec.risk_status}`}>{dec.risk_status}</span></div>
             <div className="reason">“{dec.reason}”</div>
             <div className="muted small">Riesgo: {dec.risk_reason}{dec.llm_latency_ms ? ` · latencia LLM ${dec.llm_latency_ms.toFixed(0)} ms` : ""}</div>
@@ -189,13 +225,12 @@ export default function App() {
         </div>
       </section>
 
-      <section className="grid2">
+      <section className="grid-candles">
         <div className="card">
-          <h3>Precio y operaciones {detail ? `· corrida #${detail.metrics.run_id} (${detail.metrics.mode})` : ""}</h3>
-          <LineChart fmt={v => usd(v, 0)} markers={markers}
-            series={priceRows.length ? [{ name: "Precio de valoración", color: "var(--c1)", points: priceRows.map(r => ({ x: r.date, y: r.price })) }]
-              : [{ name: "Cierre", color: "var(--c1)", points: (mk?.candles ?? []).map(c => ({ x: c.date, y: c.close })) },
-                 { name: "SMA20", color: "var(--c3)", dashed: true, points: (mk?.candles ?? []).map(c => ({ x: c.date, y: c.sma20 })) }]} />
+          <h3>Velas diarias MEXC con indicadores {detail ? `· entradas y salidas de la corrida #${detail.metrics.run_id}` : ""}</h3>
+          {mkErr && !mk ? <div className="err-box"><span className="neg small">Sin velas de MEXC: {mkErr}</span><button onClick={refreshMarket}>Reintentar</button></div>
+            : !mk ? <><div className="skeleton" style={{ height: 260 }} /><p className="muted small">Cargando velas…</p></>
+            : <CandleChart candles={mk.candles} trades={trades} fmt={v => usd(v, 0)} />}
         </div>
         <div className="card">
           <h3>Patrimonio vs comprar y mantener</h3>
@@ -209,14 +244,15 @@ export default function App() {
       <section className="card">
         <h3>Comparación de corridas (mismo periodo y costos)</h3>
         <div className="scroll"><table>
-          <thead><tr><th>#</th><th>Modo</th><th>Estrategia</th><th>Periodo</th><th>Ciclos</th><th>Rend. neto</th><th>Comprar y mantener</th><th>Max DD</th><th>Operaciones</th><th>Win Rate</th><th>Rechazadas</th><th>Latencia LLM</th><th>Estado</th></tr></thead>
+          <thead><tr><th>#</th><th>Modo</th><th>Estrategia</th><th>Tipo</th><th>Periodo</th><th>Ciclos</th><th>Rend. neto</th><th>Comprar y mantener</th><th>Max DD</th><th>Sharpe</th><th>Sortino</th><th>VaR/CVaR 95%</th><th>Stop</th><th>Operaciones (L/S)</th><th>Win Rate</th><th>Rechazadas</th><th>Latencia LLM</th><th>Estado</th></tr></thead>
           <tbody>{runs.map(r => (
             <tr key={r.run_id} className={detail?.metrics.run_id === r.run_id ? "sel" : ""} onClick={() => setSel(r.run_id)}>
-              <td>{r.run_id}</td><td>{r.mode}</td><td>{r.strategy === "llm" ? `LLM ${r.llm_model}` : "modelo sin LLM"}</td>
+              <td>{r.run_id}</td><td>{r.mode}</td><td>{r.strategy === "llm" ? `LLM ${r.llm_model}` : "modelo sin LLM"}</td><td>{r.allow_short ? "Long/Short" : "Solo largo"}</td>
               <td className="small">{r.desde} → {r.hasta}</td><td>{r.ciclos}</td>
               <td className={cls(r.rendimiento_neto)}>{pct(r.rendimiento_neto)}</td>
               <td className={cls(r.buy_and_hold?.rendimiento_neto)}>{pct(r.buy_and_hold?.rendimiento_neto)}</td>
-              <td>{pct(r.max_drawdown)}</td><td>{r.operaciones}</td><td>{pct(r.win_rate, 1)}</td><td>{r.acciones_rechazadas}</td>
+              <td>{pct(r.max_drawdown)}</td><td>{r.sharpe_anual?.toFixed(2) ?? "—"}</td><td>{r.sortino_anual?.toFixed(2) ?? "—"}</td>
+              <td>{pct(r.var95_diario)} / {pct(r.cvar95_diario)}</td><td>{r.stop_loss_pct ? pct(r.stop_loss_pct, 0) : "—"}</td><td>{r.operaciones} ({r.operaciones_long}/{r.operaciones_short})</td><td>{pct(r.win_rate, 1)}</td><td>{r.acciones_rechazadas}</td>
               <td>{r.latencia_llm_ms ? `${r.latencia_llm_ms.toFixed(0)} ms` : "—"}</td><td>{r.status}</td>
             </tr>))}</tbody>
         </table></div>
@@ -229,12 +265,12 @@ export default function App() {
             <thead><tr><th>Fecha ejec.</th><th>Lado</th><th>Estado</th><th>Precio</th><th>Cantidad</th><th>Monto</th><th>Costo</th><th>PnL</th></tr></thead>
             <tbody>{(detail?.orders ?? []).map(o => (
               <tr key={o.id} title={o.reason}>
-                <td>{o.exec_date}</td><td className={o.side === "BUY" ? "pos" : "neg"}>{o.side}</td><td>{o.status}</td>
+                <td>{o.exec_date}</td><td className={sideCls(o.side)}>{o.side}</td><td>{o.status}</td>
                 <td>{usd(o.exec_price ?? o.ref_price)}</td><td>{o.qty?.toFixed(6) ?? "—"}</td><td>{usd(o.notional)}</td><td>{usd(o.fee)}</td>
                 <td className={cls(o.pnl)}>{signed(o.pnl)}</td>
               </tr>))}</tbody>
           </table></div>
-          <p className="muted small">PnL realizado: <b className={cls(m?.pnl_realizado)}>{signed(m?.pnl_realizado)}</b> · costos totales {usd(m?.costos_totales)}</p>
+          <p className="muted small">PnL realizado: <b className={cls(m?.pnl_realizado)}>{signed(m?.pnl_realizado)}</b> (largos {signed(m?.pnl_long)} · cortos {signed(m?.pnl_short)}) · costos totales {usd(m?.costos_totales)}</p>
         </div>
         <div className="card">
           <h3>Decisiones por vela</h3>

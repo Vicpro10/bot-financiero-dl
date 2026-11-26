@@ -88,13 +88,17 @@ class LoadedModel:
     def predict_row(self, feats: pd.DataFrame, row: int) -> float:
         return float(self.predict_raw(self.make_input(feats, row))[0])
 
-    def signal(self, forecast: float, close: float, sma20: float) -> str:
-        """Regla seleccionada en VA: comprar/mantener si pronóstico > δ (y filtro SMA20 si está activo)."""
+    def signal(self, forecast: float, close: float, sma20: float, allow_short: bool = False) -> str:
+        """Regla seleccionada en VA: LONG si pronóstico > δ (y filtro SMA20 si está activo).
+        Con cortos permitidos, la regla es simétrica: SHORT si pronóstico < −δ (y cierre < SMA20 con filtro)."""
         rule = self.meta["signal_rule"]
-        ok = forecast > rule["delta"]
-        if rule.get("sma_filter"):
-            ok = ok and close > sma20
-        return "LONG" if ok else "CASH"
+        d = rule["delta"]
+        long_ok = forecast > d and (not rule.get("sma_filter") or close > sma20)
+        if long_ok:
+            return "LONG"
+        if allow_short and forecast < -d and (not rule.get("sma_filter") or close < sma20):
+            return "SHORT"
+        return "CASH"
 
 
 def load_model(model_dir: str | Path) -> LoadedModel:

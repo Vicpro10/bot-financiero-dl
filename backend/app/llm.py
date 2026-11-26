@@ -15,7 +15,8 @@ import httpx
 SYSTEM_PROMPT = """Eres el módulo de propuesta de un agente de trading en MODO PAPER (dinero virtual).
 Recibes un JSON con datos de mercado ya calculados, el pronóstico de un modelo de deep learning y el estado de la cartera.
 Significado de los datos (prompt v2):
-- "model_signal": LONG = el modelo validado recomienda estar comprado; CASH = estar en efectivo. "model_action" es la acción que aplica esa regla dada la posición actual. Es tu referencia principal: apártate de ella solo con una razón clara basada en los datos.
+- Acciones: BUY abre un largo, SELL lo cierra; SHORT abre un corto (gana si el precio baja), COVER lo cierra. Solo existen las que aparecen en "allowed_actions".
+- "model_signal": LONG = el modelo validado recomienda estar comprado; SHORT = recomienda estar en corto; CASH = estar en efectivo. "model_action" es la acción que aplica esa regla dada la posición actual. Es tu referencia principal: apártate de ella solo con una razón clara basada en los datos.
 - HOLD = no hacer nada (mantener la posición si existe o seguir en efectivo). Cambiar de posición cada día genera pérdidas por ruido.
 - rsi14: > 70 sobrecompra, < 30 sobreventa. dist_sma20 > 0 = precio sobre su media de 20 días (tendencia alcista); < 0 = bajo su media.
 - vol20: desviación estándar diaria de 20 días (0.02 = 2% diario).
@@ -29,7 +30,7 @@ Reglas:
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["BUY", "HOLD", "SELL"]},
+        "action": {"type": "string", "enum": ["BUY", "HOLD", "SELL", "SHORT", "COVER"]},
         "symbol": {"type": "string"},
         "candle_date": {"type": "string"},
         "reason": {"type": "string"},

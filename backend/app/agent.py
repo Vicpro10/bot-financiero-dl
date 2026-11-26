@@ -20,7 +20,7 @@ from .db import DB, now_iso
 from .llm import LLMInvalidResponse, LLMUnavailable, OllamaClient
 from .mexc import MarketDataError, MexcClient, SymbolRules
 from .model import LoadedModel
-from .paper import Portfolio, allowed_actions, check, execute
+from .paper import CLOSE_ACTIONS, TRADE_ACTIONS, Portfolio, allowed_actions, check, close_action, execute
 
 log = logging.getLogger("agent")
 
@@ -28,9 +28,12 @@ FAULTS = {"mexc_down", "stale_data", "ollama_down", "invalid_json", "insufficien
 
 
 def signal_to_action(signal: str, p: Portfolio) -> str:
+    """Señal objetivo -> una acción por vela. Un giro largo→corto se hace en dos velas (cerrar y luego abrir)."""
     if signal == "LONG":
-        return "BUY" if p.qty <= 0 else "HOLD"
-    return "SELL" if p.qty > 0 else "HOLD"
+        return "BUY" if p.qty == 0 else "HOLD" if p.qty > 0 else "COVER"
+    if signal == "SHORT":
+        return "SHORT" if p.qty == 0 else "HOLD" if p.qty < 0 else "SELL"
+    return "SELL" if p.qty > 0 else "COVER" if p.qty < 0 else "HOLD"
 
 
 class Agent:
@@ -60,20 +63,24 @@ class Agent:
         if not r:
             return None
         return Portfolio(cash=r["cash"], qty=r["qty"], entry_cost=r["entry_cost"], peak_equity=r["peak_equity"] or r["initial_capital"],
-                         day_start_equity=r["day_start_equity"] or r["initial_capital"], day_key=r["day_key"] or "")
+                         day_start_equity=r["day_start_equity"] or r["initial_capital"], day_key=r["day_key"] or "",
+                         entry_price=r["entry_price"] or 0.0)
 
     def _save_portfolio(self, p: Portfolio, last_candle: str | None = None):
-        self.db.ex("UPDATE runs SET cash=?, qty=?, entry_cost=?, peak_equity=?, day_start_equity=?, day_key=?, "
+        self.db.ex("UPDATE runs SET cash=?, qty=?, entry_cost=?, entry_price=?, peak_equity=?, day_start_equity=?, day_key=?, "
                    "last_candle=COALESCE(?, last_candle), updated_at=? WHERE id=?",
-                   (p.cash, p.qty, p.entry_cost, p.peak_equity, p.day_start_equity, p.day_key, last_candle, now_iso(), self.run_id))
+                   (p.cash, p.qty, p.entry_cost, p.entry_price, p.peak_equity, p.day_start_equity, p.day_key, last_candle,
+                    now_iso(), self.run_id))
 
     def _set_status(self, status: str, reason: str = ""):
         self.status, self.status_reason = status, reason
         if self.run_id:
             self.db.ex("UPDATE runs SET status=?, updated_at=? WHERE id=?", (status, now_iso(), self.run_id))
+        self.db.notify({"type": "status", "status": status, "reason": reason, "run_id": self.run_id})
 
     # ------------------------------------------------------------------ control humano
-    async def start(self, mode: str, strategy: str, replay_days: int = 60) -> int:
+    async def start(self, mode: str, strategy: str, replay_days: int = 60, allow_short: bool = False,
+                    stop_loss_pct: float | None = None) -> int:
         if self.task and not self.task.done():
             raise RuntimeError("Ya hay una corrida activa. Deténgala antes de iniciar otra.")
         if mode not in ("replay", "live") or strategy not in ("llm", "model"):
@@ -87,10 +94,11 @@ class Agent:
             re = end.strftime("%Y-%m-%d")
         self.run_id = self.db.ex(
             "INSERT INTO runs(mode,strategy,symbol,model_version,llm_model,initial_capital,fee_rate,replay_start,replay_end,status,"
-            "cash,qty,entry_cost,peak_equity,day_start_equity,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "cash,qty,entry_cost,peak_equity,day_start_equity,created_at,updated_at,allow_short,stop_loss_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (mode, strategy, self.s.symbol, self.model.version, self.s.ollama_model if strategy == "llm" else None, cap,
-             self.risk.fee_rate, rs, re, "running", cap, 0.0, 0.0, cap, cap, now_iso(), now_iso()))
-        self.db.event("start", f"Corrida {self.run_id} iniciada: modo={mode} estrategia={strategy}"
+             self.risk.fee_rate, rs, re, "running", cap, 0.0, 0.0, cap, cap, now_iso(), now_iso(), int(bool(allow_short)),
+             float(self.risk.stop_loss_pct if stop_loss_pct is None else stop_loss_pct)))
+        self.db.event("start", f"Corrida {self.run_id} iniciada: modo={mode} estrategia={strategy} {'largo/corto' if allow_short else 'solo largo'}"
                       + (f" replay {rs}→{re}" if rs else ""), run_id=self.run_id,
                       detail={"risk": asdict(self.risk), "model": self.model.version})
         self._launch()
@@ -138,12 +146,13 @@ class Agent:
         if not self.run_id:
             raise RuntimeError("No hay corrida.")
         p = self.portfolio()
-        if p.qty <= 0:
+        act = close_action(p)
+        if act is None:
             return None
         if self.rules is None:
             self.rules = await self.mexc.symbol_rules(self.s.symbol)
         price = (await self.mexc.ticker(self.s.symbol))["last"]
-        o = execute("SELL", p, price, self.risk, self.rules)
+        o = execute(act, p, price, self.risk, self.rules)
         self._record_order(None, o, "Liquidación manual del usuario", pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d"))
         self._save_portfolio(p)
         self.db.event("liquidate", f"Posición liquidada manualmente a {o['exec_price']}", run_id=self.run_id)
@@ -230,14 +239,15 @@ class Agent:
 
         p = self.portfolio()
         force_low_cash = False
-        if "insufficient_balance" in self.faults and p.qty <= 0:
+        allow_short = bool(run["allow_short"])
+        if "insufficient_balance" in self.faults and p.qty == 0:
             self.faults.discard("insufficient_balance")
             force_low_cash = True  # demostración: la orden de compra se evalúa con un saldo de 0.50 USDT
         row = feats.iloc[i]
         # 2 variables y pronóstico (mismo contrato que el entrenamiento)
         forecast = self.model.predict_row(feats, i)
-        msig = self.model.signal(forecast, float(row["close"]), float(row["sma20"]))
-        allowed = allowed_actions(p)
+        msig = self.model.signal(forecast, float(row["close"]), float(row["sma20"]), allow_short=allow_short)
+        allowed = allowed_actions(p, allow_short and self.risk.allow_short)
         eq = p.equity(float(row["close"]))
         ctx = {
             "symbol": self.s.symbol, "candle_date": d, "allowed_actions": allowed,
@@ -247,7 +257,8 @@ class Agent:
             "model_forecast_next_return": round(forecast, 6), "model_signal": msig,
             "model_action": signal_to_action(msig, p),
             "model_rule": self.model.meta["signal_rule"], "position": p.position, "cash": round(p.cash, 2),
-            "position_qty": round(p.qty, 6), "equity": round(eq, 2),
+            "position_qty": round(p.qty, 6), "entry_price": round(p.entry_price, 2), "equity": round(eq, 2),
+            "short_allowed": allow_short,
         }
         # 3-4 propuesta
         latency, raw, source = None, None, "modelo"
@@ -275,20 +286,29 @@ class Agent:
                 raise
         else:
             proposed = signal_to_action(msig, p)
-            reason = (f"Pronóstico {forecast:+.3%} {'>' if forecast > self.model.meta['signal_rule']['delta'] else '≤'} "
-                      f"δ={self.model.meta['signal_rule']['delta']:.2%}; señal {msig}.")
+            dl = self.model.meta["signal_rule"]["delta"]
+            cmp_ = ">" if forecast > dl else "<" if forecast < -dl else "dentro de"
+            reason = f"Pronóstico {forecast:+.3%} {cmp_} ±δ={dl:.2%}; señal {msig}."
+        # 5a stop-loss por operación (determinista, antes que cualquier propuesta)
+        sl = float(run["stop_loss_pct"] or 0)
+        if sl > 0 and p.qty != 0 and p.entry_price > 0:
+            adverse = (p.entry_price - float(row["close"])) / p.entry_price if p.qty > 0 else (float(row["close"]) - p.entry_price) / p.entry_price
+            if adverse >= sl:
+                proposed = close_action(p)
+                reason = f"STOP-LOSS: movimiento adverso {adverse:.2%} ≥ {sl:.0%} desde la entrada {p.entry_price:,.2f}; se cierra la posición."
+                self.db.event("stop_loss", f"{d}: {reason}", "WARN", self.run_id)
         # 5 riesgo determinista
         if force_low_cash:
             proposed, reason = "BUY", "[FALLO INYECTADO] compra con saldo insuficiente"
             low = Portfolio(cash=0.5, peak_equity=0.5, day_start_equity=0.5, day_key=exec_date)
-            rr = check(proposed, self.s.symbol, low, exec_price, self.risk, self.rules, data_age_hours, exec_date)
+            rr = check(proposed, self.s.symbol, low, exec_price, self.risk, self.rules, data_age_hours, exec_date, allow_short=allow_short)
         else:
-            rr = check(proposed, self.s.symbol, p, exec_price, self.risk, self.rules, data_age_hours, exec_date)
+            rr = check(proposed, self.s.symbol, p, exec_price, self.risk, self.rules, data_age_hours, exec_date, allow_short=allow_short)
         if rr.status != "APPROVED":
             self.db.event("risk", f"{d}: {proposed} → {rr.status}: {rr.reason}", "WARN", self.run_id)
         # 6 ejecución Paper
         order = None
-        if rr.final_action in ("BUY", "SELL"):
+        if rr.final_action in TRADE_ACTIONS:
             order = execute(rr.final_action, p, exec_price, self.risk, self.rules)
         res = self._persist(d, row, forecast, msig, proposed, source, reason, rr.final_action, rr.status, rr.reason,
                             latency, raw, p, order, exec_date, value_price)
@@ -308,7 +328,7 @@ class Agent:
              float(row["rsi14"]), forecast, msig, proposed, source, reason, final, status, rreason, latency, raw, now_iso()))
         if order:
             self._record_order(did, order, reason, exec_date)
-        elif status == "REJECTED" and proposed in ("BUY", "SELL"):
+        elif status == "REJECTED" and proposed in TRADE_ACTIONS:
             self.db.ex("INSERT INTO orders(run_id,decision_id,side,status,ref_price,reason,exec_date,created_at) VALUES (?,?,?,?,?,?,?,?)",
                        (self.run_id, did, proposed, "REJECTED", value_price, rreason, exec_date, now_iso()))
         eq = p.equity(value_price)
@@ -317,6 +337,8 @@ class Agent:
         self._save_portfolio(p, last_candle=d)
         self.last_cycle = {"candle_date": d, "forecast": forecast, "model_signal": msig, "proposed": proposed,
                            "final_action": final, "risk_status": status, "reason": reason, "equity": eq}
+        self.db.notify({"type": "decision", "run_id": self.run_id, **self.last_cycle,
+                        "order": order["side"] if order else None, "position": p.position})
         return self.last_cycle
 
     def _record_order(self, did, o, reason, exec_date):
@@ -335,8 +357,12 @@ def run_metrics(db: DB, run_id: int) -> dict:
     orders = db.q("SELECT * FROM orders WHERE run_id=?", (run_id,))
     dec = db.q("SELECT llm_latency_ms, risk_status FROM decisions WHERE run_id=?", (run_id,))
     cap = run["initial_capital"]
-    sells = [o for o in orders if o["side"] == "SELL" and o["status"] == "FILLED"]
-    out = {"run_id": run_id, "mode": run["mode"], "strategy": run["strategy"], "model_version": run["model_version"],
+    sells = [o for o in orders if o["side"] in CLOSE_ACTIONS and o["status"] == "FILLED"]
+    longs = [o for o in sells if o["side"] == "SELL"]
+    shorts = [o for o in sells if o["side"] == "COVER"]
+    out = {"run_id": run_id, "mode": run["mode"], "strategy": run["strategy"], "allow_short": bool(run["allow_short"]),
+           "operaciones_long": len(longs), "operaciones_short": len(shorts),
+           "pnl_long": float(sum(o["pnl"] or 0 for o in longs)), "pnl_short": float(sum(o["pnl"] or 0 for o in shorts)), "model_version": run["model_version"],
            "llm_model": run["llm_model"], "status": run["status"], "ciclos": len(dec),
            "operaciones": sum(o["status"] == "FILLED" for o in orders),
            "operaciones_cerradas": len(sells),
@@ -345,11 +371,13 @@ def run_metrics(db: DB, run_id: int) -> dict:
            "acciones_rechazadas": sum(d["risk_status"] in ("REJECTED", "BLOCKED") for d in dec),
            "latencia_llm_ms": float(np.mean([d["llm_latency_ms"] for d in dec if d["llm_latency_ms"]])) if any(d["llm_latency_ms"] for d in dec) else None,
            "pnl_realizado": float(sum(o["pnl"] or 0 for o in sells))}
+    out["stop_loss_pct"] = run["stop_loss_pct"]
     if eq:
         e = pd.Series([x["equity"] for x in eq])
         out.update({"patrimonio": float(e.iloc[-1]), "pnl_total": float(e.iloc[-1] - cap), "rendimiento_neto": float(e.iloc[-1] / cap - 1),
                     "max_drawdown": float((1 - e / pd.concat([pd.Series([cap]), e]).cummax().iloc[1:].values).max()),
                     "desde": eq[0]["date"], "hasta": eq[-1]["date"]})
+        out.update(risk_metrics(pd.concat([pd.Series([cap]), e]).pct_change().dropna()))
         # comprar y mantener en el mismo periodo y costos: compra al primer precio de ejecución, vende al último
         c = db.q("SELECT date, open, close FROM candles WHERE symbol=? AND date>=? AND date<=? ORDER BY date",
                  (run["symbol"], eq[0]["date"], eq[-1]["date"]))
@@ -362,3 +390,21 @@ def run_metrics(db: DB, run_id: int) -> dict:
             out["buy_and_hold"] = {"rendimiento_neto": float(qty * last * (1 - fee) / cap - 1),
                                    "max_drawdown": float((1 - bh_curve / bh_curve.cummax()).max())}
     return out
+
+
+def risk_metrics(r: pd.Series, conf: float = 0.95) -> dict:
+    """Métricas de los apuntes de clase sobre rendimientos diarios del patrimonio (cripto: 365 días/año, tasa libre de riesgo 0).
+    VaR/CVaR históricos a 1 día al 95%, como pérdida positiva (CVaR con peso fraccionario en la cola)."""
+    r = r.astype(float)
+    if len(r) < 5:
+        return {"sharpe_anual": None, "sortino_anual": None, "var95_diario": None, "cvar95_diario": None, "volatilidad_anual": None}
+    sd = r.std(ddof=1)
+    down = float(np.sqrt(np.minimum(r, 0).pow(2).mean()))
+    losses = np.sort(-r.to_numpy())[::-1]
+    mass = (1 - conf) * len(r)
+    w = np.clip(mass - np.arange(len(r)), 0, 1)
+    return {"sharpe_anual": float(r.mean() / sd * np.sqrt(365)) if sd > 0 else None,
+            "sortino_anual": float(r.mean() / down * np.sqrt(365)) if down > 0 else None,
+            "var95_diario": float(np.quantile(losses, conf, method="inverted_cdf")),
+            "cvar95_diario": float(losses @ w / mass) if mass > 0 else None,
+            "volatilidad_anual": float(sd * np.sqrt(365))}

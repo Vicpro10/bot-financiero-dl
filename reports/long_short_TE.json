@@ -1,0 +1,63 @@
+{
+  "modelo": "v1-mlp-lags-t4-20261126",
+  "periodo_TE": [
+    "2025-11-17",
+    "2026-11-24"
+  ],
+  "delta": 0.002,
+  "dias_senal": {
+    "LONG": 163,
+    "SHORT": 37,
+    "CASH": 173
+  },
+  "resultados": {
+    "solo_largo_fee0.001": {
+      "rend_neto": -0.22713108241389313,
+      "max_dd": 0.36898605637004744,
+      "operaciones_cerradas": 97,
+      "largos": 97,
+      "cortos": 0,
+      "pnl_largos": -22713.108241389316,
+      "pnl_cortos": 0.0,
+      "win_rate": 0.4639175257731959,
+      "costos": 15908.525111314855
+    },
+    "long_short_fee0.001": {
+      "rend_neto": -0.1487072740879679,
+      "max_dd": 0.3673812084462792,
+      "operaciones_cerradas": 110,
+      "largos": 92,
+      "cortos": 18,
+      "pnl_largos": -14234.548324563817,
+      "pnl_cortos": -636.179084233052,
+      "win_rate": 0.4636363636363636,
+      "costos": 19398.243806864626
+    },
+    "solo_largo_fee0.0": {
+      "rend_neto": -0.06166265926713144,
+      "max_dd": 0.31079553218365163,
+      "operaciones_cerradas": 97,
+      "largos": 97,
+      "cortos": 0,
+      "pnl_largos": -6166.2659267131385,
+      "pnl_cortos": 0.0,
+      "win_rate": 0.4948453608247423,
+      "costos": 0.0
+    },
+    "long_short_fee0.0": {
+      "rend_neto": 0.06071863421755097,
+      "max_dd": 0.3000949705266468,
+      "operaciones_cerradas": 110,
+      "largos": 92,
+      "cortos": 18,
+      "pnl_largos": 3168.5705278217793,
+      "pnl_cortos": 2903.2928939332924,
+      "win_rate": 0.4909090909090909,
+      "costos": 0.0
+    },
+    "comprar_y_mantener": {
+      "rend_neto": -0.3524978795058489
+    }
+  },
+  "nota": "Análisis posterior a la evaluación oficial de TE; regla simétrica sin parámetros nuevos."
+}

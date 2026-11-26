@@ -5,12 +5,14 @@ El backend también es el GATEWAY de Ollama: nadie habla con el LLM sin pasar po
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -98,6 +100,8 @@ async def market(days: int = 90):
     df = await mx.recent_candles(S.symbol, days=max(days, 60))
     df = F.validate_candles(df)
     feats = F.build_features(df)
+    sd = feats["close"].rolling(20).std(ddof=0)            # Bandas de Bollinger: SMA20 ± 2σ de los cierres
+    feats["bb_up"], feats["bb_dn"] = feats["sma20"] + 2 * sd, feats["sma20"] - 2 * sd
     i = len(feats) - 1
     m = STATE["model"]
     fc = m.predict_row(feats, i)
@@ -107,9 +111,11 @@ async def market(days: int = 90):
         "last_closed_candle": feats.index[i].strftime("%Y-%m-%d"),
         "indicators": {k: float(last[k]) for k in ("close", "sma20", "dist_sma20", "vol20", "rsi14")},
         "forecast": {"cutoff": feats.index[i].strftime("%Y-%m-%d"), "next_return": fc,
-                     "signal": m.signal(fc, float(last["close"]), float(last["sma20"]))},
+                     "signal": m.signal(fc, float(last["close"]), float(last["sma20"])),
+                     "signal_long_short": m.signal(fc, float(last["close"]), float(last["sma20"]), allow_short=True)},
         "candles": [{"date": d.strftime("%Y-%m-%d"), "open": r.open, "high": r.high, "low": r.low, "close": r.close,
-                     "sma20": None if r.sma20 != r.sma20 else r.sma20} for d, r in feats.tail(days).iterrows()],
+                     "sma20": _num(r.sma20), "bb_up": _num(r.bb_up), "bb_dn": _num(r.bb_dn), "rsi14": _num(r.rsi14)}
+                    for d, r in feats.tail(days).iterrows()],
     }
 
 
@@ -140,12 +146,14 @@ class StartReq(BaseModel):
     mode: str = Field("replay", pattern="^(replay|live)$")
     strategy: str = Field("model", pattern="^(llm|model)$")
     replay_days: int = Field(60, ge=20, le=365)
+    stop_loss_pct: float | None = Field(None, ge=0, le=0.5)   # stop-loss por operación (None = el de risk.json)
+    allow_short: bool = False   # Long/Short en Paper (sin apalancamiento); por defecto solo largo, como el protocolo
 
 
 @app.post("/api/agent/start", dependencies=auth)
 async def start(req: StartReq):
     try:
-        rid = await STATE["agent"].start(req.mode, req.strategy, req.replay_days)
+        rid = await STATE["agent"].start(req.mode, req.strategy, req.replay_days, req.allow_short, req.stop_loss_pct)
     except (RuntimeError, ValueError) as e:
         raise HTTPException(409, str(e))
     return {"run_id": rid}
@@ -229,3 +237,55 @@ async def inject(kind: str):
 @app.api_route("/api/real/{path:path}", methods=["GET", "POST", "PUT", "DELETE"], include_in_schema=False)
 async def real_orders_blocked(path: str):
     raise HTTPException(403, "Órdenes reales deshabilitadas: este sistema solo opera en modo Paper.")
+
+
+def _num(v):
+    return None if v is None or v != v else float(v)
+
+
+# ---------------------------------------------------------------- WebSocket (eventos en vivo)
+@app.websocket("/ws")
+async def ws(websocket: WebSocket):
+    """Canal en vivo para la UI. Autenticación: el primer mensaje debe ser {"type":"auth","key":"..."}
+    (la clave no viaja en la URL, así no queda en logs). Luego el servidor empuja:
+    ticker de MEXC cada 5 s, decisiones, cambios de estado y eventos/errores del agente."""
+    await websocket.accept()
+    try:
+        first = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=10))
+    except (asyncio.TimeoutError, ValueError, WebSocketDisconnect):
+        await websocket.close(code=4401)
+        return
+    if not isinstance(first, dict) or not hmac.compare_digest(str(first.get("key", "")), S.api_key):
+        STATE["db"].event("auth", "WebSocket rechazado: clave ausente o incorrecta.", "WARN")
+        await websocket.send_text(json.dumps({"type": "error", "message": "API key ausente o incorrecta."}))
+        await websocket.close(code=4401)
+        return
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    loop = asyncio.get_running_loop()
+
+    def push(msg: dict):
+        loop.call_soon_threadsafe(lambda: q.full() or q.put_nowait(msg))
+
+    STATE["db"].listeners.append(push)
+    await websocket.send_text(json.dumps({"type": "hello", "status": STATE["agent"].status, "symbol": S.symbol}))
+
+    async def ticker_loop():
+        while True:
+            try:
+                t = await STATE["mexc"].ticker(S.symbol)
+                push({"type": "ticker", **t})
+            except MarketDataError as e:
+                push({"type": "error", "message": f"MEXC: {e}"})
+            await asyncio.sleep(5)
+
+    tk = asyncio.create_task(ticker_loop())
+    try:
+        while True:
+            msg = await q.get()
+            await websocket.send_text(json.dumps(msg, default=str))
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        tk.cancel()
+        if push in STATE["db"].listeners:
+            STATE["db"].listeners.remove(push)

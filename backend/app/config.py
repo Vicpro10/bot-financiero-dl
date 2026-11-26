@@ -34,7 +34,9 @@ class RiskConfig:
     max_drawdown_halt: float = 0.25   # si el drawdown supera 25%: detener el agente
     max_data_age_hours: float = 30.0  # la última vela cerrada debe tener menos de 30 h
     allowed_symbols: list[str] = field(default_factory=lambda: ["BTCUSDT"])
-    allowed_actions: list[str] = field(default_factory=lambda: ["BUY", "HOLD", "SELL"])
+    allowed_actions: list[str] = field(default_factory=lambda: ["BUY", "HOLD", "SELL", "SHORT", "COVER"])
+    stop_loss_pct: float = 0.0       # stop-loss por operación sobre el precio de entrada (0 = apagado; p. ej. 0.05 = 5%)
+    allow_short: bool = True          # interruptor general; cada corrida elige además si permite cortos (Paper, sin apalancamiento)
 
 
 @dataclass

@@ -244,3 +244,79 @@ def test_api_rejects_missing_or_wrong_key():
         assert c.post("/api/real/order", headers={"X-API-Key": os.environ["AGENT_API_KEY"]}).status_code == 403
         st = c.get("/api/status", headers={"X-API-Key": os.environ["AGENT_API_KEY"]}).json()
         assert "api_key" not in str(st).lower() or os.environ["AGENT_API_KEY"] not in str(st)
+
+
+# ---------------------------------------------------------------- v1.1: Entry / Long / Short
+def test_short_open_cover_pnl_and_no_leverage():
+    p = Portfolio(cash=50000, peak_equity=50000, day_start_equity=50000, day_key="d")
+    assert check("SHORT", "BTCUSDT", p, 60000, CFG, RULES, None, "d", allow_short=True).status == "APPROVED"
+    o = execute("SHORT", p, 60000, CFG, RULES)
+    assert p.position == "SHORT" and p.qty < 0 and p.entry_price == o["exec_price"]
+    assert abs(p.qty) * 60000 <= 0.951 * 50000          # exposición ≤ 95%: sin apalancamiento
+    assert abs(p.equity(60000) - 50000) < 50            # al abrir, el patrimonio casi no cambia (solo deslizamiento)
+    assert p.equity(54000) > 50000 and p.equity(66000) < 50000  # el corto gana si baja y pierde si sube
+    assert check("SHORT", "BTCUSDT", p, 60000, CFG, RULES, None, "d", allow_short=True).status == "REJECTED"  # sin doble corto
+    assert check("BUY", "BTCUSDT", p, 60000, CFG, RULES, None, "d", allow_short=True).status == "REJECTED"    # sin giro directo
+    c = execute("COVER", p, 54000, CFG, RULES)
+    assert p.qty == 0 and c["pnl"] > 0 and abs(p.cash - (50000 + c["pnl"])) < 1e-6
+
+
+def test_short_rejected_when_run_is_long_only():
+    p = Portfolio(cash=50000, peak_equity=50000, day_start_equity=50000, day_key="d")
+    r = check("SHORT", "BTCUSDT", p, 60000, CFG, RULES, None, "d", allow_short=False)
+    assert r.status == "REJECTED" and "corto" in r.reason
+
+
+def test_signal_to_action_transitions():
+    from app.agent import signal_to_action
+    cash, lng, sht = Portfolio(cash=1), Portfolio(cash=0, qty=1), Portfolio(cash=2, qty=-1)
+    assert [signal_to_action(s, cash) for s in ("LONG", "SHORT", "CASH")] == ["BUY", "SHORT", "HOLD"]
+    assert [signal_to_action(s, lng) for s in ("LONG", "SHORT", "CASH")] == ["HOLD", "SELL", "SELL"]
+    assert [signal_to_action(s, sht) for s in ("LONG", "SHORT", "CASH")] == ["COVER", "HOLD", "COVER"]
+
+
+def test_model_signal_symmetric_short():
+    m = load_model(ROOT / "models" / "current")
+    d = m.meta["signal_rule"]["delta"]
+    assert m.signal(-2 * d, 100, 101, allow_short=True) == "SHORT"
+    assert m.signal(-2 * d, 100, 101, allow_short=False) == "CASH"
+    assert m.signal(2 * d, 102, 101, allow_short=True) == "LONG"
+
+
+def test_agent_long_short_cycle_records_short():
+    ag, db = make_agent()
+    rid = new_run(ag)
+    db.ex("UPDATE runs SET allow_short=1 WHERE id=?", (rid,))
+    for i in range(30, len(FEATS) - 1):
+        asyncio.run(ag.cycle(FEATS, i, float(FEATS["open"].iloc[i + 1]), FEATS.index[i + 1].strftime("%Y-%m-%d"),
+                             float(FEATS["close"].iloc[i + 1]), None))
+    sides = {o["side"] for o in db.q("SELECT side FROM orders WHERE run_id=? AND status='FILLED'", (rid,))}
+    runs = db.one("SELECT qty FROM runs WHERE id=?", (rid,))
+    assert sides <= {"BUY", "SELL", "SHORT", "COVER"} and sides  # opera y solo con acciones válidas
+    assert runs["qty"] is not None
+
+
+def test_websocket_requires_key():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as c:
+        with c.websocket_connect("/ws") as w:
+            w.send_text('{"type":"auth","key":"mala"}')
+            assert "incorrecta" in w.receive_text()
+        with c.websocket_connect("/ws") as w:
+            w.send_text('{"type":"auth","key":"%s"}' % os.environ["AGENT_API_KEY"])
+            assert '"hello"' in w.receive_text()
+
+
+def test_stop_loss_closes_position_and_risk_metrics():
+    from app.agent import risk_metrics
+    ag, db = make_agent()
+    rid = new_run(ag)
+    db.ex("UPDATE runs SET qty=0.8, cash=2000, entry_price=70000, entry_cost=56000, stop_loss_pct=0.05 WHERE id=?", (rid,))
+    feats = FEATS.copy()
+    feats.iloc[ROW, feats.columns.get_loc("close")] = 60000.0   # -14% desde la entrada
+    r = asyncio.run(ag.cycle(feats, ROW, 60000, "2026-04-30", 60000, None))
+    assert r["final_action"] == "SELL" and "STOP-LOSS" in r["reason"]
+    assert db.one("SELECT qty FROM runs WHERE id=?", (rid,))["qty"] == 0
+    m = risk_metrics(pd.Series([0.01, -0.02, 0.015, -0.005, 0.02, -0.03, 0.01]))
+    assert m["var95_diario"] > 0 and m["cvar95_diario"] >= m["var95_diario"] and m["sharpe_anual"] is not None

@@ -52,3 +52,17 @@ tr.sel { background: #1c2733; } tbody tr { cursor: default; } .lv-ERROR td { col
 .login form { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; }
 code { background: #0d1117; padding: 1px 5px; border-radius: 4px; }
 footer { padding: 8px 0 20px; }
+.c-up line, .c-up rect { stroke: var(--pos); fill: var(--pos); } .c-dn line, .c-dn rect { stroke: var(--neg); fill: var(--bg); stroke-width: 1.2; }
+.c-up line, .c-dn line { stroke-width: 1; }
+.sma { fill: none; stroke: var(--c3); stroke-width: 2; } .bb { fill: none; stroke: var(--c4); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.mk-cover { fill: var(--c1); } .mk-short { fill: #f0883e; } .lg-short { background: #f0883e; }
+.lg-up { background: var(--pos); } .lg-dn { background: transparent; border: 1.5px solid var(--neg); } .lg-bb { background: var(--c4); }
+.ws { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.ws.on { color: var(--pos); border-color: var(--pos); } .ws.off { color: var(--warn); border-color: var(--warn); }
+.skeleton { height: 26px; border-radius: 6px; background: linear-gradient(90deg, #1c2330 25%, #262f3d 50%, #1c2330 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.err-box { border: 1px solid var(--neg); background: #2d1416; border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 13px; padding-bottom: 6px; }
+.pos-long { color: var(--pos); } .pos-short { color: #f0883e; }
+.grid-candles { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+@media (max-width: 1000px) { .grid-candles { grid-template-columns: 1fr; } }
