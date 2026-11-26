@@ -156,7 +156,7 @@ DESCARGA = {"fuente": "MEXC spot API v3 /api/v3/klines interval=1d", "simbolo": 
             "periodo": f"{raw.date.min().date()} a {raw.date.max().date()}", "filas_descargadas": len(raw),
             "ajustes": "no aplican (cripto); sin relleno de días ni volumen inventado"}
 raw.to_csv(OUT / "datos/raw" / f"{SYMBOL}_1d_mexc_raw.csv", index=False)
-(OUT / "datos/raw" / "metadatos_descarga.json").write_text(json.dumps(DESCARGA, indent=2, ensure_ascii=False))
+(OUT / "datos/raw" / "metadatos_descarga.json").write_text(json.dumps(DESCARGA, indent=2, ensure_ascii=False), encoding="utf-8")
 DESCARGA
 """)
 code(r"""
@@ -223,6 +223,8 @@ LAGS = [f"ret_lag{k}" for k in range(WINDOW)]
 IND = ["dist_sma20", "vol20"]
 feats = build_features(data)
 usable = feats.dropna(subset=LAGS + IND + ["target"]).copy()   # se retiran filas sin indicador válido o sin objetivo
+# La LSTM con indicadores necesita 20 pasos con indicador válido: todas las versiones usan el MISMO periodo evaluable.
+usable = usable.iloc[WINDOW - 1:]
 print("Primera fecha con todas las variables válidas:", usable.index[0].date(), "| filas útiles:", len(usable))
 usable.to_csv(OUT / "datos/processed" / f"{SYMBOL}_features_v1.csv")
 """)
@@ -539,7 +541,7 @@ class TradingEnv:
         return self.cash + self.qty * price
     def state(self):
         r = self.df.iloc[self.t]
-        return {"fecha": r.name.date(), "rend_recientes": r[LAGS].to_numpy().round(4).tolist()[:5], "pronostico": float(self.preds[self.t]),
+        return {"fecha": r.name.date(), "rend_recientes": r[LAGS].astype(float).to_numpy().round(4).tolist()[:5], "pronostico": float(self.preds[self.t]),
                 "vol20": float(r.vol20), "dist_sma20": float(r.dist_sma20), "efectivo": self.cash, "posicion": int(self.qty > 0)}
     def step(self, action):
         if action not in self.ACTIONS:
@@ -685,7 +687,7 @@ CONGELADO = {"modelo_final": FINAL, "mejor_dl": DL_BEST, "reglas": RULES, "delta
              "lr": LR, "batch": BATCH, "semilla": SEED, "env": ENV}
 blob = json.dumps(CONGELADO, sort_keys=True, default=str)
 CONGELADO["hash"] = hashlib.sha256(blob.encode()).hexdigest()[:16]
-(OUT / "resultados/config_congelada.json").write_text(json.dumps(CONGELADO, indent=2, default=str))
+(OUT / "resultados/config_congelada.json").write_text(json.dumps(CONGELADO, indent=2, default=str), encoding="utf-8")
 print("Configuración congelada", CONGELADO["hash"], "— a partir de aquí TE se abre UNA sola vez.")
 
 # Evaluación de las versiones finales PREDEFINIDAS en TR, VA y TE (no se vuelve a elegir con TE)
@@ -761,7 +763,8 @@ code(r"""
 def export_for_backend(name, folder):
     # Formato que carga backend/app/model.py (inferencia NumPy) + prueba de contrato check_x/check_y.
     kind, var = name.split("_"); folder = OUT / "modelos" / folder; folder.mkdir(parents=True, exist_ok=True)
-    w, meta = {}, {"version": f"v1-{kind}-{var}-t4-{dt.date.today():%Y%m%d}", "feature_contract": "v1", "symbol": SYMBOL,
+    hw = "t4" if GPU_NAME and "T4" in GPU_NAME else "cputest"
+    w, meta = {}, {"version": f"v1-{kind}-{var}-{hw}-{dt.date.today():%Y%m%d}", "feature_contract": "v1", "symbol": SYMBOL,
                     "signal_rule": RULES.get(name, {"delta": DELTAS[0], "sma_filter": False}), "trained_on": f"{ENV['gpu'] or 'CPU (prueba)'} · torch {torch.__version__}",
                     "splits": {k: {"inicio": str(v.index[0].date()), "fin": str(v.index[-1].date()), "n": len(v)} for k, v in SETS.items()},
                     "config_hash": CONGELADO["hash"], "seed": SEED, "source": DESCARGA["fuente"]}
@@ -791,7 +794,7 @@ def export_for_backend(name, folder):
         base = feats.dropna(subset=vars_); cx = seq_tensor(base, SETS["TE"].index[:8], vars_); cy = PRED[name]["TE"][:8]
     w["check_x"], w["check_y"] = cx, cy
     np.savez(folder / "model.npz", **w)
-    (folder / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    (folder / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     with open(folder / "scaler.pkl", "wb") as fh:
         pickle.dump(sx, fh)
     if kind != "linreg":
@@ -800,6 +803,10 @@ def export_for_backend(name, folder):
 
 export_for_backend(FINAL, "final")
 export_for_backend(DL_BEST, "dl_best")
+LSTM_BEST = min(["lstm_lags", "lstm_ind"], key=va_rmse.get)   # también se exporta la mejor LSTM (elegida con VA)
+if LSTM_BEST not in RULES:
+    RULES[LSTM_BEST] = pick_rule(LSTM_BEST) if (CD.modelo == LSTM_BEST).any() else {"delta": RULES[DL_BEST]["delta"], "sma_filter": RULES[DL_BEST]["sma_filter"]}
+export_for_backend(LSTM_BEST, "lstm_best")
 pd.DataFrame(EXPERIMENTOS).to_csv(OUT / "resultados/experimentos.csv", index=False)
 pd.DataFrame(BITACORA, columns=["fecha", "etapa", "error", "causa", "accion_correctiva", "verificacion"]).to_csv(OUT / "resultados/bitacora_errores.csv", index=False)
 RES_SIM.to_csv(OUT / "resultados/resumen_simulacion_TE.csv")
