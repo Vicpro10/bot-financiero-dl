@@ -1,0 +1,17 @@
+{
+  "initial_capital": 50000.0,
+  "fee_rate": 0.0,
+  "slippage_bps": 2.0,
+  "max_exposure": 0.95,
+  "max_daily_loss": 0.05,
+  "max_drawdown_halt": 0.25,
+  "max_data_age_hours": 30.0,
+  "allowed_symbols": [
+    "BTCUSDT"
+  ],
+  "allowed_actions": [
+    "BUY",
+    "HOLD",
+    "SELL"
+  ]
+}
