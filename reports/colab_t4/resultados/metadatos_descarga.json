@@ -1,0 +1,10 @@
+{
+  "fuente": "MEXC spot API v3 /api/v3/klines interval=1d",
+  "simbolo": "BTCUSDT",
+  "moneda_cotizada": "USDT",
+  "zona_horaria": "UTC",
+  "fecha_descarga_utc": "2026-11-26T16:59:30+00:00",
+  "periodo": "2020-01-01 a 2026-11-25",
+  "filas_descargadas": 2521,
+  "ajustes": "no aplican (cripto); sin relleno de días ni volumen inventado"
+}

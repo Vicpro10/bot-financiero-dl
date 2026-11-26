@@ -1,0 +1,6 @@
+fecha,etapa,error,causa,accion_correctiva,verificacion
+2026-11-26T17:00:25+00:00,prueba controlada,conjunto vacío,copia pequeña modificada a propósito,detener el flujo con mensaje,excepción específica capturada
+2026-11-26T17:00:25+00:00,prueba controlada,fecha duplicada,copia pequeña modificada a propósito,detener el flujo con mensaje,excepción específica capturada
+2026-11-26T17:00:25+00:00,prueba controlada,valor no válido,copia pequeña modificada a propósito,detener el flujo con mensaje,excepción específica capturada
+2026-11-26T17:00:25+00:00,preparación,fecha repetida,1 filas duplicadas,conservar la última aparición,índice único
+2026-11-26T17:00:25+00:00,prueba controlada,dimensiones incorrectas,"tensor (4,20,5) a una LSTM de 1 variable",detener e informar forma esperada y recibida,RuntimeError específico

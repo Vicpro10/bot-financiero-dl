@@ -23,3 +23,6 @@ frontend/dist/
 notebook/salidas/
 notebook/entrega_dl_finanzas.zip
 *.log
+
+# zip descargado de Colab (su contenido está en reports/colab_t4)
+*.zip

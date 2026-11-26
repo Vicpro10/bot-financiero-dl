@@ -67,7 +67,8 @@ bot-financiero-dl/
 │   ├── .env.example               ← plantilla de configuración SIN secretos
 │   ├── requirements.txt
 │   ├── config/risk.json           ← límites de riesgo (el LLM no puede cambiarlos)
-│   ├── models/current/            ← modelo en uso: model.npz + meta.json (versionado)
+│   ├── models/current/            ← modelo en uso: MLP entrenada en Tesla T4 (model.npz, meta.json, scaler.pkl, model_torch.pt)
+│   ├── models/v0_cpu/             ← modelo provisional anterior (referencia)
 │   ├── app/
 │   │   ├── main.py      ← API FastAPI, autenticación, gateway del LLM
 │   │   ├── agent.py     ← ciclo del agente, control humano, recuperación tras reinicio
@@ -84,6 +85,7 @@ bot-financiero-dl/
 │   └── src/ (App.tsx, Charts.tsx, api.ts, styles.css)
 ├── data/raw, data/processed       ← datos originales y procesados (CSV)
 ├── reports/                       ← experimentos, umbrales, simulaciones exportadas
+│   └── colab_t4/                  ← EVIDENCIA OFICIAL de Colab T4: resultados, figuras, modelos y checkpoints
 └── docs/                          ← presentación ejecutiva y evidencias
 ```
 
@@ -238,21 +240,64 @@ Resultado actual: **16 passed**. Cubren la validación de datos (vacío, duplica
 
 ## 9. Resultados
 
-> Las cifras de esta sección salen de la ejecución en CPU del **modelo provisional v0** (`backend/scripts/train_cpu_baseline.py`). Hay que reemplazarlas con las del notebook ejecutado en **Colab T4** (sección 5) antes de la entrega final.
+> **Evidencia oficial: notebook ejecutado en Google Colab con NVIDIA Tesla T4** (2026-11-26 16:59 UTC; Python 3.13.16, torch 2.14.1+cu130, CUDA 13.0, semilla 42, configuración congelada `7414f5e18dfc513e`). Todos los entrenamientos de MLP y LSTM registran `dispositivo = cuda:0`. Archivos en `reports/colab_t4/`: `evidencia_t4.txt` (salida de `nvidia-smi`), `experimentos.csv`, `predicciones_TE.csv`, `prediccion_futura.csv`, `simulacion.csv`, `bitacora_errores.csv`, figuras, modelos y checkpoints.
 
 ### 9.1 Particiones (BTC/USDT, MEXC, diario UTC)
-| Conjunto | Desde | Hasta | Ejemplos |
-|---|---|---|---|
-| TR (70%) | 2020-01-21 | 2024-11-04 | 1,750 |
-| VA (15%) | 2024-11-05 | 2025-11-14 | 375 |
-| TE (15%) | 2025-11-15 | 2026-11-24 | 375 |
+| Conjunto | Emisión desde | Emisión hasta | Último objetivo | Ejemplos |
+|---|---|---|---|---|
+| TR (70%) | 2020-02-09 | 2024-11-09 | 2024-11-10 | 1,736 |
+| VA (15%) | 2024-11-10 | 2025-11-16 | 2025-11-17 | 372 |
+| TE (15%) | 2025-11-17 | 2026-11-24 | 2026-11-25 | 373 |
 
-### 9.2 Modelo provisional v0 (CPU)
+### 9.2 Modelos en la T4
+**Capítulo 8.** Selección por RMSE de VA: MLP con 64 neuronas ocultas (0.022747) y LSTM con 32 unidades (0.022827). Variación entre semillas (42, 7 y 2024) en RMSE de VA: MLP de 0.022747 a 0.022988; LSTM de 0.022794 a 0.022837. Cada entrenamiento tardó de 1.5 a 6 s en la T4.
+
+| Modelo (versión final) | RMSE TR | RMSE VA | RMSE TE | MAE TE | DA TE |
+|---|---|---|---|---|---|
+| Pronóstico cero | 0.034337 | 0.022833 | 0.023122 | 0.015917 | — |
+| Regresión lineal, rezagos | 0.033925 | 0.022818 | 0.023510 | 0.016425 | 45.0% |
+| Regresión lineal, rezagos + indicadores | 0.033880 | **0.022739** | 0.023403 | 0.016405 | 44.0% |
+| MLP, rezagos (**mejor DL**, en el agente) | 0.033800 | 0.022747 | 0.023351 | 0.016409 | 45.8% |
+| MLP, rezagos + indicadores | 0.033510 | 0.023021 | 0.023480 | 0.016515 | 44.0% |
+| LSTM, rezagos | 0.034200 | 0.022837 | 0.023181 | 0.016034 | 48.8% |
+| LSTM, rezagos + indicadores | 0.034045 | 0.022790 | **0.023060** | **0.015984** | **49.3%** |
+
+- **¿El deep learning supera a la regresión lineal?** En **TE, sí**: la MLP (0.023351) y las dos LSTM (0.023181 y 0.023060) tienen menor RMSE que las dos regresiones (0.023510 y 0.023403). En **VA** la regresión con indicadores gana por 0.000008, un empate práctico. Por la regla del protocolo, el modelo "final" elegido con VA es la regresión; el **agente usa el mejor modelo profundo (MLP)**, exportado por la regla fijada antes de abrir TE.
+- **¿Supera al pronóstico cero?** En TE solo la LSTM con indicadores lo hace (0.023060 contra 0.023122). En rendimientos diarios la señal es pequeña frente al ruido.
+- **Hipótesis técnica (capítulo 11):** los indicadores mejoran el RMSE de VA en la regresión (0.022818 → 0.022739) y en la LSTM (0.022837 → 0.022790), pero lo empeoran en la MLP (0.022747 → 0.023021). La hipótesis se acepta para la regresión y la LSTM, no en general.
+- **Ventanas expansivas (capítulo 9):** en las 3 ventanas el pronóstico cero tuvo el menor RMSE o quedó prácticamente empatado. La ventaja de los modelos no es robusta en el tiempo.
+- **Regla elegida en VA:** comprar si el pronóstico es mayor que δ = 0.20%, sin filtro SMA20. En VA, la MLP con esa regla rindió +34.2% (con 0.10% por lado).
+- **Simulación en TE (100,000 USDT, ejecución en la apertura de t+1):**
+
+| Estrategia | Rend. neto | Max DD | Operaciones | Win Rate | Costos |
+|---|---|---|---|---|---|
+| MLP, 0.10% por lado | −22.7% | 36.9% | 97 | 46.4% | 15,909 |
+| MLP, 0% (MEXC) | **−6.2%** | 31.1% | 97 | 49.5% | 0 |
+| Regresión, 0.10% por lado | −31.6% | 35.4% | 81 | 43.2% | 12,539 |
+| Comprar y mantener | −35.2% | 39.5% | 1 | — | 165 |
+| Efectivo | 0.0% | 0.0% | 0 | — | 0 |
+
+- **Pronóstico futuro:** con corte el 2026-11-25, el rendimiento estimado para el 2026-11-26 es +0.065%. La señal es EFECTIVO (no supera δ). El valor real queda vacío hasta observarse.
+- **Fallos provocados:** conjunto vacío, fecha duplicada, valor no válido y dimensiones incorrectas, todos detenidos con excepciones específicas (`bitacora_errores.csv`).
+
+### 9.2b Modelo provisional v0 (CPU, histórico)
+Antes de tener la T4, el agente usó un modelo provisional (`backend/models/v0_cpu/`). Se conserva como referencia.
 - En VA, la **regresión lineal con rezagos e indicadores** tuvo el menor RMSE (0.02321), por delante de los MLP de scikit-learn. Por eso es el modelo provisional. Regla elegida en VA: δ = 0.20% sin filtro SMA20.
 - **TE, simulación con 100,000 USDT y 0.10% por lado:** estrategia **−27.8%** frente a comprar y mantener **−37.5%** (BTC cayó de ~95k a ~60k USDT en TE). Drawdown máximo: 33.5% contra 39.5%. 79 operaciones, Win Rate 45.6%, costos 12,488 USDT.
 - **Agente Paper, replay de 90 días (2026-08-28 → 2026-11-25), 50,000 USDT, 0% de costo:** **+0.14%** (PnL +70.59 USDT) frente a comprar y mantener **−24.7%**. 90 ciclos, 45 operaciones, Win Rate 45.5%, drawdown máximo 11.8%.
 
-### 9.3 Comparación que pide la rúbrica: sin LLM, con LLM y pasiva
+### 9.3 Agente Paper con el modelo de la T4 (`v1-mlp-lags-t4-20261126`)
+Replays con 50,000 USDT, 0% de costo y 2 pb de deslizamiento, sobre velas reales de MEXC (periodo dentro de TE, fuera de TR y VA):
+
+| Corrida | Periodo | Rend. neto | PnL (USDT) | Max DD | Operaciones | Win Rate | Comprar y mantener |
+|---|---|---|---|---|---|---|---|
+| Modelo sin LLM, 90 días | 2026-08-28 → 2026-11-25 | **+7.03%** | **+3,513.67** | 4.9% | 51 | 52.0% | −24.66% |
+| Modelo sin LLM, 60 días | 2026-09-27 → 2026-11-25 | **+2.55%** | +1,276.36 | 4.9% | 35 | 47.1% | −28.41% |
+| Agente con LLM (prompt v2), 60 días | 2026-09-27 → 2026-11-25 | −10.68% | −5,340.63 | 17.5% | 37 | 38.9% | −28.41% |
+
+Latencia media del LLM: 6,145 ms por decisión (Ollama 0.40.18, `llama3.2:3b`, CPU local). 0 acciones rechazadas por riesgo.
+
+### 9.3b Primera comparación con el modelo v0 (CPU)
 Replay de 60 días (2026-09-27 → 2026-11-25), 50,000 USDT, 0% de costo, 2 pb de deslizamiento, mismo modelo v0. Ollama local con `llama3.2:3b` (Ollama 0.40.18, CPU, sin nube).
 
 | Estrategia | Rend. neto | PnL (USDT) | Max DD | Operaciones | Win Rate | Latencia LLM | Rechazadas |
@@ -264,6 +309,8 @@ Replay de 60 días (2026-09-27 → 2026-11-25), 50,000 USDT, 0% de costo, 2 pb d
 
 **¿El LLM aporta valor?** En este periodo, **no**. Con el prompt v1, el modelo de 3B interpretó mal los indicadores (llamó "sobrecompra" a un RSI de 24) y cambió de posición todos los días. El prompt v2 agrega definiciones correctas de RSI, `dist_sma20` y HOLD, y la acción que propone el modelo (`model_action`). Con eso bajó a 33 operaciones y a −10.2%, pero sigue por debajo del modelo sin LLM. Las tres estrategias activas perdieron menos que el mercado. El LLM sirve como capa de explicación (motivo legible por decisión), no como fuente de rendimiento. Se hizo un solo cambio de prompt y se reportan las dos versiones.
 
+Con el modelo de la T4 se repite el patrón: sin LLM +2.55%, con LLM −10.68%. El LLM de 3B no aporta rendimiento en estos periodos.
+
 ### 9.4 Prueba del notebook (CPU, solo para validar el código)
 Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (118 s). Esa corrida **no** es la evidencia oficial, que debe salir de la T4.
 - Particiones del notebook: TR 2020-02-09 → 2024-11-09 (1,736) · VA 2024-11-10 → 2025-11-16 (372) · TE 2025-11-17 → 2026-11-24 (373). Arrancan 19 días después que en el modelo v0 porque todas las versiones usan el mismo periodo evaluable que la LSTM con indicadores.
@@ -274,7 +321,7 @@ Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (
 ### 9.5 Lectura honesta
 - La estrategia pierde menos que comprar y mantener en mercados bajistas porque pasa a efectivo, pero **en TE no obtuvo rentabilidad positiva**. El protocolo pide "+20%"; la rúbrica aclara que "no se exige obtener ganancias ni superar al modelo sencillo". Se reportan las cifras reales, sin ajustar el sistema después de ver TE.
 - Superar al pronóstico cero en RMSE con rendimientos diarios es difícil: la señal útil es pequeña frente al ruido.
-- Si la versión Colab (MLP/LSTM en T4) no supera a la regresión lineal en VA, se reporta así y se exporta igualmente `dl_best` para el agente.
+- En la T4, el deep learning supera a la regresión lineal en TE pero empata con ella en VA. En los replays recientes el agente con la MLP fue positivo (+7.03% en 90 días, +2.55% en 60) mientras el mercado caía de 25% a 28%. En el TE completo (un año bajista, −35%) perdió −6.2% con 0% de costo. No alcanza el +20% en TE, y así se reporta.
 
 ## 10. Versiones y avances
 
@@ -290,7 +337,7 @@ Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (
 | **v0.8** | 2026-11-26 | Proyecto final | Panel React + TypeScript: precio en vivo, pronóstico, operaciones, PnL, comparación y bitácora |
 | **v0.9** | 2026-11-26 | Proyecto final | Inyección de fallos, 16 pruebas automatizadas, recuperación tras reinicio |
 | **v0.9.1** | 2026-11-26 | Proyecto final | Ollama local integrado (llama3.2:3b), prompt v2 con definiciones de indicadores y `model_action`, comparación sin LLM, con LLM y pasiva; notebook probado de punta a punta y exporta `lstm_best` |
-| **v1.0** | 2026-11-27 | Entrega | README, presentación ejecutiva y modelo de Colab T4 integrado |
+| **v1.0** | 2026-11-26 | Entrega | Notebook ejecutado en Colab **Tesla T4**; modelo MLP de la T4 integrado al agente (`models/current`), evidencia en `reports/colab_t4/`, README y presentación con cifras reales |
 
 ## 11. Correspondencia con las rúbricas
 

@@ -1,0 +1,49 @@
+{
+  "version": "v1-lstm-ind-t4-20261126",
+  "feature_contract": "v1",
+  "symbol": "BTCUSDT",
+  "signal_rule": {
+    "delta": 0.002,
+    "sma_filter": false
+  },
+  "trained_on": "Tesla T4 · torch 2.14.1+cu130",
+  "splits": {
+    "TR": {
+      "inicio": "2020-02-09",
+      "fin": "2024-11-09",
+      "n": 1736
+    },
+    "VA": {
+      "inicio": "2024-11-10",
+      "fin": "2025-11-16",
+      "n": 372
+    },
+    "TE": {
+      "inicio": "2025-11-17",
+      "fin": "2026-11-24",
+      "n": 373
+    }
+  },
+  "config_hash": "7414f5e18dfc513e",
+  "seed": 42,
+  "source": "MEXC spot API v3 /api/v3/klines interval=1d",
+  "kind": "lstm",
+  "n_head": 1,
+  "seq_vars": [
+    "ret",
+    "dist_sma20",
+    "vol20"
+  ],
+  "x_mean": [
+    0.0018424201432565887,
+    0.01338970488057882,
+    0.031150671072623475
+  ],
+  "x_scale": [
+    0.03416876736002549,
+    0.08636708039722456,
+    0.014022663020491342
+  ],
+  "y_mean": 0.0017941689459576998,
+  "y_scale": 0.03429031296132107
+}

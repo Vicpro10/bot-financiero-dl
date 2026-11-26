@@ -1,0 +1,42 @@
+{
+  "modelo_final": "linreg_ind",
+  "mejor_dl": "mlp_lags",
+  "reglas": {
+    "linreg_ind": {
+      "delta": 0.002,
+      "sma_filter": false
+    },
+    "mlp_lags": {
+      "delta": 0.002,
+      "sma_filter": false
+    }
+  },
+  "deltas": [
+    0.0005,
+    0.001,
+    0.002,
+    0.003,
+    0.005
+  ],
+  "configs": {
+    "mlp": "(64,)",
+    "lstm": "32"
+  },
+  "lr": 0.001,
+  "batch": 64,
+  "semilla": 42,
+  "env": {
+    "python": "3.13.16",
+    "torch": "2.14.1+cu130",
+    "cuda": "13.0",
+    "gpu": "Tesla T4",
+    "device": "cuda",
+    "numpy": "2.4.6",
+    "pandas": "2.2.3",
+    "sklearn": "1.6.1",
+    "seed": 42,
+    "colab": true,
+    "fecha_utc": "2026-11-26T16:59:28+00:00"
+  },
+  "hash": "7414f5e18dfc513e"
+}
