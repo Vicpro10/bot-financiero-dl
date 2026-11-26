@@ -116,7 +116,7 @@ export function CandleChart({ candles, trades = [], fmt }: { candles: Candle[]; 
       <div className="legend">
         <span><i className="lg-up" />Vela alcista</span><span><i className="lg-dn" />Vela bajista</span>
         <span><i style={{ background: "var(--c3)" }} />SMA20</span><span><i className="lg-bb" />Bollinger (20, 2σ)</span>
-        <span><i className="lg-buy" />Compra / Cover</span><span><i className="lg-short" />Short</span><span><i className="lg-sell" />Venta</span>
+        <span><i className="lg-buy" />Compra</span><span><i style={{ background: "var(--c1)" }} />Cover</span><span><i className="lg-short" />Short</span><span><i className="lg-sell" />Venta</span>
         {h && <span className="hover-read">{h.date} · A {fmt(h.open)} · M {fmt(h.high)} · m {fmt(h.low)} · C {fmt(h.close)}{h.sma20 ? ` · SMA20 ${fmt(h.sma20)}` : ""}</span>}
       </div>
     </div>
