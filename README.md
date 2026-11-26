@@ -295,6 +295,8 @@ Replays con 50,000 USDT, 0% de costo y 2 pb de deslizamiento, sobre velas reales
 | Modelo sin LLM, 60 días | 2026-09-27 → 2026-11-25 | **+2.55%** | +1,276.36 | 4.9% | 35 | 47.1% | −28.41% |
 | Agente con LLM (prompt v2), 60 días | 2026-09-27 → 2026-11-25 | −10.68% | −5,340.63 | 17.5% | 37 | 38.9% | −28.41% |
 
+**Conexión Live con MEXC (no replay), 2026-11-26:** el agente leyó la última vela cerrada (2026-11-25, cierre 60,454.44 USDT). El modelo de la T4 pronosticó +0.259% (señal LONG), el riesgo aprobó la compra (`APPROVED`) y el simulador Paper ejecutó **BUY 0.785539 BTC a 60,467.97 USDT**, el precio en vivo de MEXC con 2 pb de deslizamiento. Después se pulsó *Detener*: se bloquean nuevas órdenes y la posición queda abierta, como define el protocolo.
+
 Latencia media del LLM: 6,145 ms por decisión (Ollama 0.40.18, `llama3.2:3b`, CPU local). 0 acciones rechazadas por riesgo.
 
 ### 9.3b Primera comparación con el modelo v0 (CPU)
