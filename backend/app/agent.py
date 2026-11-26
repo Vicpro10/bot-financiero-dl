@@ -245,6 +245,7 @@ class Agent:
             "dist_sma20": round(float(row["dist_sma20"]), 5), "vol20": round(float(row["vol20"]), 5),
             "rsi14": round(float(row["rsi14"]), 2), "last_5_returns": [round(float(x), 5) for x in feats["ret"].iloc[i - 4 : i + 1]],
             "model_forecast_next_return": round(forecast, 6), "model_signal": msig,
+            "model_action": signal_to_action(msig, p),
             "model_rule": self.model.meta["signal_rule"], "position": p.position, "cash": round(p.cash, 2),
             "position_qty": round(p.qty, 6), "equity": round(eq, 2),
         }

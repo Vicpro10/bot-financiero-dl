@@ -252,7 +252,26 @@ Resultado actual: **16 passed**. Cubren la validación de datos (vacío, duplica
 - **TE, simulación con 100,000 USDT y 0.10% por lado:** estrategia **−27.8%** frente a comprar y mantener **−37.5%** (BTC cayó de ~95k a ~60k USDT en TE). Drawdown máximo: 33.5% contra 39.5%. 79 operaciones, Win Rate 45.6%, costos 12,488 USDT.
 - **Agente Paper, replay de 90 días (2026-08-28 → 2026-11-25), 50,000 USDT, 0% de costo:** **+0.14%** (PnL +70.59 USDT) frente a comprar y mantener **−24.7%**. 90 ciclos, 45 operaciones, Win Rate 45.5%, drawdown máximo 11.8%.
 
-### 9.3 Lectura honesta
+### 9.3 Comparación que pide la rúbrica: sin LLM, con LLM y pasiva
+Replay de 60 días (2026-09-27 → 2026-11-25), 50,000 USDT, 0% de costo, 2 pb de deslizamiento, mismo modelo v0. Ollama local con `llama3.2:3b` (Ollama 0.40.18, CPU, sin nube).
+
+| Estrategia | Rend. neto | PnL (USDT) | Max DD | Operaciones | Win Rate | Latencia LLM | Rechazadas |
+|---|---|---|---|---|---|---|---|
+| Modelo sin LLM | **−7.73%** | −3,863.65 | 11.8% | 29 | 42.9% | — | 0 |
+| Agente con LLM, prompt v1 | −19.36% | −9,678.08 | 21.8% | 60 | 40.0% | 7,226 ms | 0 |
+| Agente con LLM, prompt v2 | −10.24% | −5,118.50 | 12.4% | 33 | 37.5% | 5,921 ms | 0 |
+| Comprar y mantener | −28.41% | −14,205 | — | 1 | — | — | — |
+
+**¿El LLM aporta valor?** En este periodo, **no**. Con el prompt v1, el modelo de 3B interpretó mal los indicadores (llamó "sobrecompra" a un RSI de 24) y cambió de posición todos los días. El prompt v2 agrega definiciones correctas de RSI, `dist_sma20` y HOLD, y la acción que propone el modelo (`model_action`). Con eso bajó a 33 operaciones y a −10.2%, pero sigue por debajo del modelo sin LLM. Las tres estrategias activas perdieron menos que el mercado. El LLM sirve como capa de explicación (motivo legible por decisión), no como fuente de rendimiento. Se hizo un solo cambio de prompt y se reportan las dos versiones.
+
+### 9.4 Prueba del notebook (CPU, solo para validar el código)
+Antes de Colab, el notebook se ejecutó completo en CPU con `ALLOW_CPU_TEST=1` (118 s). Esa corrida **no** es la evidencia oficial, que debe salir de la T4.
+- Particiones del notebook: TR 2020-02-09 → 2024-11-09 (1,736) · VA 2024-11-10 → 2025-11-16 (372) · TE 2025-11-17 → 2026-11-24 (373). Arrancan 19 días después que en el modelo v0 porque todas las versiones usan el mismo periodo evaluable que la LSTM con indicadores.
+- RMSE de VA: regresión lineal con indicadores 0.022739, MLP con rezagos 0.022747, LSTM con indicadores 0.022790, cero 0.022833. Entre la regresión y la MLP hay un empate práctico (diferencia de 0.000008).
+- En TE, la MLP tuvo menor RMSE que la regresión lineal (0.023351 contra 0.023403) y la LSTM con indicadores fue la única por debajo del pronóstico cero (0.023060 contra 0.023122).
+- Simulación en TE con la MLP: −22.7% con 0.10% por lado y −6.2% con 0% (MEXC), frente a −35.3% de comprar y mantener.
+
+### 9.5 Lectura honesta
 - La estrategia pierde menos que comprar y mantener en mercados bajistas porque pasa a efectivo, pero **en TE no obtuvo rentabilidad positiva**. El protocolo pide "+20%"; la rúbrica aclara que "no se exige obtener ganancias ni superar al modelo sencillo". Se reportan las cifras reales, sin ajustar el sistema después de ver TE.
 - Superar al pronóstico cero en RMSE con rendimientos diarios es difícil: la señal útil es pequeña frente al ruido.
 - Si la versión Colab (MLP/LSTM en T4) no supera a la regresión lineal en VA, se reporta así y se exporta igualmente `dl_best` para el agente.
@@ -270,6 +289,7 @@ Resultado actual: **16 passed**. Cubren la validación de datos (vacío, duplica
 | **v0.7** | 2026-11-26 | Proyecto final | Gateway y cliente Ollama local con validación JSON; estrategias con y sin LLM |
 | **v0.8** | 2026-11-26 | Proyecto final | Panel React + TypeScript: precio en vivo, pronóstico, operaciones, PnL, comparación y bitácora |
 | **v0.9** | 2026-11-26 | Proyecto final | Inyección de fallos, 16 pruebas automatizadas, recuperación tras reinicio |
+| **v0.9.1** | 2026-11-26 | Proyecto final | Ollama local integrado (llama3.2:3b), prompt v2 con definiciones de indicadores y `model_action`, comparación sin LLM, con LLM y pasiva; notebook probado de punta a punta y exporta `lstm_best` |
 | **v1.0** | 2026-11-27 | Entrega | README, presentación ejecutiva y modelo de Colab T4 integrado |
 
 ## 11. Correspondencia con las rúbricas
