@@ -1,6 +1,6 @@
 # Bot Financiero DL: agente de trading Paper con Deep Learning sobre datos reales de MEXC
 
-> Proyecto de **Deep Learning para Finanzas** (Prof. Rubén Miguel Rodríguez Rangel).
+> **Autor:** Vicente Rafael Reyes Vieyra · Proyecto de **Deep Learning para Finanzas** (Prof. Rubén Miguel Rodríguez Rangel).
 > El proyecto va del pronóstico de rendimientos (capítulos 7 a 11 de *Deep Learning for Finance*, S. Kaabar) a un **agente de IA** que lee datos reales del par **BTC/USDT** en **MEXC**, consulta un modelo predictivo y un **LLM local (Ollama)**, pasa controles de riesgo deterministas y opera **solo en modo Paper** (dinero virtual), mostrando **operaciones y PnL** en un panel React + TypeScript.
 
 **Las órdenes reales están deshabilitadas por diseño.** No existe código que envíe órdenes a MEXC; la ruta `/api/real/*` responde `403`. No se necesita ninguna clave de MEXC porque solo se consumen datos públicos.
